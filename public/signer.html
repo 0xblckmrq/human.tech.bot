@@ -277,7 +277,7 @@
         try {
           sigOutput.innerText = sig;
           setStatus("Submitting signature to bot...");
-          const resp = await fetch("/api/signature", {
+          const resp = await fetch("https://human-tech-bot.onrender.com/api/signature", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ userId: userId.toString(), signature: sig })
