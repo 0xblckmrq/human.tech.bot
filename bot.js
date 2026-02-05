@@ -18,7 +18,7 @@ const TOKEN = process.env.BOT_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 const API_KEY = process.env.WHITELIST_API_KEY;
-const EXTERNAL_URL = https://vercel.com/holonym/discord-verification-bot.vercel.app
+const EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL;
 const PASSPORT_API_KEY = process.env.PASSPORT_API_KEY;
 const ALCHEMY_BASE_KEY = process.env.ALCHEMY_BASE_KEY; // Alchemy Base RPC
 
