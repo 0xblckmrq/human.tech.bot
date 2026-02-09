@@ -1,3 +1,4 @@
+
 # human.tech Covenant Verification Bot
 
 A Discord bot that links a user’s **Ethereum wallet** to their **Discord account** and automatically manages roles based on covenant status, NFT ownership, and Humanity Passport scores.
@@ -136,3 +137,13 @@ ALCHEMY_WEBHOOK_SIGNING_KEY
 ## 📜 License
 
 MIT
+---
+
+## 💖 Support & Donations
+
+If you find this project useful, donations are welcome as a gesture of gratitude.
+
+**ENS / Ethereum address:**  
+`0xblckmrq.eth`
+
+Thank you for supporting open-source development.
