@@ -274,6 +274,19 @@
 
     <p>Connect your wallet used for the covenant and sign the challenge below.</p>
 
+    <div id="walletRow" style="display:none; margin: 14px 0 18px; padding: 12px 14px; border: 1px solid rgba(0,0,0,0.08); border-radius: 12px; background: rgba(52,88,234,0.04);">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+        <div style="min-width: 240px;">
+          <div style="font-size:0.85rem; color: rgba(17,17,17,0.65); margin-bottom:4px;">Connected wallet</div>
+          <div id="connectedWallet" style="font-family: monospace; font-size:0.95rem; word-break: break-all;"></div>
+        </div>
+        <button id="changeWalletBtn" type="button" style="padding:10px 14px; border-radius:10px; border: 1px solid rgba(0,0,0,0.12); background:#fff; cursor:pointer; font-weight:700;">
+          Change wallet
+        </button>
+      </div>
+    </div>
+
+
     <div class="wallet-btns">
       <button class="wallet-btn injected" id="btnInjected" type="button">Browser Wallet</button>
       <button class="wallet-btn walletconnect" id="btnWC" type="button">WalletConnect</button>
@@ -348,6 +361,86 @@
           el.classList.toggle("active", idx < stepNum);
         });
       }
+
+      // ---- Status (no signing needed) + Change wallet ----
+      const walletRow = document.getElementById("walletRow");
+      const connectedWalletEl = document.getElementById("connectedWallet");
+      const changeWalletBtn = document.getElementById("changeWalletBtn");
+
+      function shortAddr(a) {
+        if (!a) return "";
+        const s = String(a);
+        if (s.length <= 14) return s;
+        return s.slice(0, 6) + "…" + s.slice(-4);
+      }
+
+      function showLinkedWallet(wallet) {
+        if (!walletRow || !connectedWalletEl) return;
+        connectedWalletEl.innerText = wallet;
+        walletRow.style.display = "block";
+      }
+
+      function hideLinkedWallet() {
+        if (!walletRow) return;
+        walletRow.style.display = "none";
+        if (connectedWalletEl) connectedWalletEl.innerText = "";
+      }
+
+      async function loadStatus() {
+        try {
+          if (!userId) return;
+          // same host as signature endpoint
+          const resp = await fetch("https://human-tech-bot.onrender.com/api/status?userId=" + encodeURIComponent(userId.toString()), {
+            method: "GET",
+            headers: { "Accept": "application/json" }
+          });
+          const result = await resp.json();
+
+          if (result && result.success) {
+            // If backend knows wallet, show it
+            const wallet = result?.inputs?.wallet || result?.wallet || null;
+            if (wallet) showLinkedWallet(wallet);
+
+            // If there are any assigned roles, render cards immediately
+            const hasRoles =
+              (Array.isArray(result?.assignedRoles) && result.assignedRoles.length > 0) ||
+              (Array.isArray(result?.roles) && result.roles.length > 0) ||
+              (typeof result?.roles === "string" && result.roles.trim().length > 0);
+
+            if (hasRoles) {
+              renderRolePanel(result);
+            const wallet = result?.inputs?.wallet || result?.wallet;
+            if (wallet) showLinkedWallet(wallet);
+            // Once verified, keep UI minimal; hide connect/sign unless changing wallet
+            btn.style.display = "none";
+            document.querySelector(".wallet-btns").style.display = "none";
+              updateStep(4);
+              setStatus("This private channel will auto-delete.");
+              // Hide connect/sign until user explicitly changes wallet
+              btn.style.display = "none";
+              document.querySelector(".wallet-btns").style.display = "none";
+            }
+          }
+        } catch (e) {
+          // Silent fail — status is convenience only
+          console.warn("Status load failed:", e?.message || e);
+        }
+      }
+
+      if (changeWalletBtn) {
+        changeWalletBtn.addEventListener("click", () => {
+          // Allow re-linking wallet by signing again
+          document.querySelector(".wallet-btns").style.display = "flex";
+          btn.style.display = "block";
+          setStatus("Changing wallet: choose a wallet then click Connect & Sign.");
+          // Keep cards visible until a new verification succeeds (less jarring).
+          // If you prefer clearing them immediately, uncomment next 2 lines:
+          // const rp = document.getElementById("rolePanel"); if (rp) rp.style.display = "none";
+          // hideLinkedWallet();
+        });
+      }
+
+
 
 
       // ---- Role assignment UX ----
@@ -500,6 +593,11 @@
           if (result.success) {
             step4.classList.add("active");
             renderRolePanel(result);
+            const wallet = result?.inputs?.wallet || result?.wallet;
+            if (wallet) showLinkedWallet(wallet);
+            // Once verified, keep UI minimal; hide connect/sign unless changing wallet
+            btn.style.display = "none";
+            document.querySelector(".wallet-btns").style.display = "none";
             // Keep UI minimal — role cards are the source of truth
             setStatus("This private channel will auto-delete.");
             return;
@@ -518,6 +616,11 @@
           if (hasRoles) {
             step4.classList.add("active");
             renderRolePanel(result);
+            const wallet = result?.inputs?.wallet || result?.wallet;
+            if (wallet) showLinkedWallet(wallet);
+            // Once verified, keep UI minimal; hide connect/sign unless changing wallet
+            btn.style.display = "none";
+            document.querySelector(".wallet-btns").style.display = "none";
             setStatus("This private channel will auto-delete.");
             return;
           }
@@ -646,6 +749,7 @@
       });
 
       setStatus("Ready. Choose a wallet then click Connect & Sign.");
+      loadStatus();
     });
   </script>
 </body>
