@@ -257,7 +257,7 @@
   </style>
 </head>
 <body>
-
+<h2 style='margin-top:20px'>See your role status below:</h2>
 
   <header>
     <img src="/logo.png" alt="human.tech Logo">
@@ -559,7 +559,7 @@
             <div class="role-meta">
               <p class="role-name">${role.display}${isQualified && !isAssigned ? " (Qualified)" : ""}</p>
               <p class="role-unlocks"><strong>Unlocks:</strong> ${unlocks}</p>
-              <p class="role-reason"><strong>Why:</strong> ${reasonText}</p>
+              ${!isAssigned ? `<p class="role-reason"><strong>Why:</strong> ${reasonText}</p>` : ``}
             </div>
           `;
           list.appendChild(item);
