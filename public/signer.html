@@ -284,13 +284,13 @@
 
     <button id="signBtn" type="button">Connect & Sign</button>
 
-    <p id="status"></p>
-    <p id="signature"></p>
+    
+    
 
     <div id="rolePanel" class="role-panel" style="display:none;">
-      <h2 class="role-title"></h2>
-      <p class="role-subtitle"></p>
-      <div id="roleList" class="role-list"></div>
+      
+      
+      
       <p class="role-footnote">Note: Any <strong>Covenant</strong> role (Covenant Signatory O.G. or Covenant Verified Signatory) unlocks the <em>covenant discussion</em> and <em>meme contest</em> channels.</p>
     </div>
 
@@ -299,7 +299,7 @@
   <!-- Keep: ethers UMD (known working) -->
   <script src="https://cdn.jsdelivr.net/npm/ethers@6.9.0/dist/ethers.umd.min.js"></script>
 
-  <!-- ✅ NEW: self-hosted bundle (Reown AppKit + WaaP) -->
+  <!--  NEW: self-hosted bundle (Reown AppKit + WaaP) -->
   <!-- This file is generated at build time into: public/vendor/wallets.bundle.js -->
   <script src="/vendor/wallets.bundle.js"></script>
 
@@ -502,7 +502,7 @@
             const summary = renderRolePanel(result) || { assignedPretty: [], qualifiedPretty: [] };
             const q = summary.qualifiedPretty.length ? summary.qualifiedPretty.join(", ") : "—";
             const a = summary.assignedPretty.length ? summary.assignedPretty.join(", ") : "—";
-            setStatus(`✅ \n ${q}\n ${a}\n\nThis private channel will auto-delete.`);
+            setStatus(` \n ${q}\n ${a}\n\nThis private channel will auto-delete.`);
           } else {
             setStatus("❌ Verification failed: " + (result.error || "Unknown error"));
             const rp = document.getElementById("rolePanel"); if (rp) rp.style.display = "none";
