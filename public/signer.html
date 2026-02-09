@@ -533,7 +533,15 @@
           if (!isAssigned) {
             if (backendReason) reasonText = backendReason;
             else if (isQualified) reasonText = "You qualified, but the bot did not assign this role (check bot permissions / role hierarchy).";
-            else reasonText = "Not eligible based on your verification.";
+            else {
+              if (role.key === "chosen_one") {
+                reasonText = "Human Passport score is below 70.";
+              } else if (role.key === "og_humn") {
+                reasonText = "Human Passport score is below 20.";
+              } else {
+                reasonText = "Not eligible based on your verification.";
+              }
+            }
             // Custom covenant messaging (requested)
             if (role.key === "covenant_signatory_og" && !backendReason && !isQualified) {
               reasonText = "You do not own the limited edition Human Tech Covenant Signatory.";
