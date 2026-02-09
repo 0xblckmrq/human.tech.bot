@@ -1,5 +1,5 @@
 
-# human.tech Covenant Verification Bot
+# human.tech Discord Verification Bot
 
 A Discord bot that links a user’s **Ethereum wallet** to their **Discord account** and automatically manages roles based on covenant status, NFT ownership, and Humanity Passport scores.
 
