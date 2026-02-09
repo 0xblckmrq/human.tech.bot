@@ -185,6 +185,75 @@
       word-break: break-word;
       font-family: monospace;
     }
+  
+    /* role assignment panel */
+    .role-panel {
+      margin-top: 22px;
+      padding-top: 18px;
+      border-top: 1px solid rgba(0,0,0,0.08);
+    }
+    .role-title {
+      margin: 0 0 6px;
+      font-size: 1.15rem;
+      color: var(--text-color);
+    }
+    .role-subtitle {
+      margin: 0 0 14px;
+      color: rgba(17,17,17,0.7);
+      font-size: 0.95rem;
+      line-height: 1.35;
+    }
+    .role-list { display: flex; flex-direction: column; gap: 10px; }
+    .role-item {
+      border: 1px solid rgba(0,0,0,0.08);
+      border-radius: 12px;
+      padding: 12px 14px;
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+    }
+    .role-badge {
+      min-width: 86px;
+      text-align: center;
+      font-weight: 800;
+      font-size: 0.75rem;
+      padding: 8px 10px;
+      border-radius: 999px;
+      align-self: center;
+      user-select: none;
+    }
+    .role-badge.assigned {
+      background: rgba(99,173,20,0.14);
+      color: var(--success);
+      border: 1px solid rgba(99,173,20,0.35);
+    }
+    .role-badge.not-assigned {
+      background: rgba(0,0,0,0.05);
+      color: rgba(17,17,17,0.75);
+      border: 1px solid rgba(0,0,0,0.12);
+    }
+    .role-meta { flex: 1; }
+    .role-name {
+      margin: 0;
+      font-size: 1rem;
+      color: var(--text-color);
+      font-weight: 750;
+      letter-spacing: 0.2px;
+    }
+    .role-unlocks, .role-reason {
+      margin: 4px 0 0;
+      font-size: 0.92rem;
+      line-height: 1.35;
+    }
+    .role-unlocks { color: rgba(17,17,17,0.78); }
+    .role-reason { color: rgba(17,17,17,0.62); }
+    .role-reason strong { color: rgba(17,17,17,0.78); }
+    .role-footnote {
+      margin: 14px 0 0;
+      font-size: 0.9rem;
+      color: rgba(17,17,17,0.7);
+    }
+
   </style>
 </head>
 <body>
@@ -216,6 +285,14 @@
 
     <p id="status"></p>
     <p id="signature"></p>
+
+    <div id="rolePanel" class="role-panel" style="display:none;">
+      <h2 class="role-title">Your role status</h2>
+      <p class="role-subtitle">After verification we’ll show what you qualify for, what was assigned, and what each role unlocks.</p>
+      <div id="roleList" class="role-list"></div>
+      <p class="role-footnote">Note: Any <strong>Covenant</strong> role unlocks the <em>covenant discussion</em> and <em>meme contest</em> channels.</p>
+    </div>
+
   </main>
 
   <!-- Keep: ethers UMD (known working) -->
@@ -271,6 +348,130 @@
         });
       }
 
+
+      // ---- Role assignment UX ----
+      // Roles + what they unlock (as requested)
+      const ROLE_DEFS = [
+        {
+          key: "chosen_one",
+          display: "Chosen One",
+          unlocks: ['"the chosen people" channel'],
+          // optional: treat as covenant role? If your server treats it as covenant, set true.
+          covenant: false
+        },
+        {
+          key: "og_humn",
+          display: "O.G. HUMN",
+          unlocks: ['"og humns" channel'],
+          covenant: false
+        },
+        {
+          key: "covenant",
+          display: "Covenant",
+          unlocks: ['covenant discussion channel', 'meme contest channel'],
+          covenant: true
+        }
+      ];
+
+      function normRoleKey(r) {
+        return (r || "")
+          .toString()
+          .trim()
+          .toLowerCase()
+          .replace(/\s+/g, "_")
+          .replace(/[^a-z0-9_]/g, "");
+      }
+
+      function parseRoleList(v) {
+        if (!v) return [];
+        if (Array.isArray(v)) return v.map(normRoleKey).filter(Boolean);
+        if (typeof v === "string") return v.split(",").map(normRoleKey).filter(Boolean);
+        // if backend returns an object like { roleName: true }
+        if (typeof v === "object") {
+          return Object.entries(v)
+            .filter(([_, val]) => !!val)
+            .map(([k]) => normRoleKey(k));
+        }
+        return [];
+      }
+
+      function renderRolePanel(result) {
+        const panel = document.getElementById("rolePanel");
+        const list = document.getElementById("roleList");
+        if (!panel || !list) return;
+
+        const assigned = parseRoleList(result?.assignedRoles || result?.rolesAssigned || result?.roles || result?.assigned);
+        const qualified = parseRoleList(result?.qualifiedRoles || result?.qualified || result?.eligibleRoles);
+        const reasons = result?.roleReasons || result?.reasons || result?.ineligibleReasons || {};
+
+        // if backend only returns "qualifiedRole" as a single string
+        const qualifiedOne = normRoleKey(result?.qualifiedRole || result?.roleQualifiedFor || result?.qualified_for);
+        if (qualifiedOne && !qualified.includes(qualifiedOne)) qualified.push(qualifiedOne);
+
+        // If backend doesn’t return anything, we still show explicit “assigned/not assigned”
+        const effectiveAssigned = new Set(assigned);
+        const effectiveQualified = new Set(qualified);
+
+        list.innerHTML = "";
+
+        ROLE_DEFS.forEach((role) => {
+          const isAssigned = effectiveAssigned.has(role.key) || effectiveAssigned.has(normRoleKey(role.display));
+          const isQualified = effectiveQualified.has(role.key) || effectiveQualified.has(normRoleKey(role.display));
+
+          const badgeText = isAssigned ? "ASSIGNED" : "NOT ASSIGNED";
+          const badgeClass = isAssigned ? "assigned" : "not-assigned";
+
+          // Reason priority:
+          // - explicit reason from backend
+          // - if qualified but not assigned, show that it’s pending / failed assignment
+          // - otherwise show “not eligible”
+          const backendReason =
+            reasons?.[role.key] ||
+            reasons?.[role.display] ||
+            reasons?.[normRoleKey(role.display)] ||
+            reasons?.[role.key.toUpperCase()] ||
+            "";
+
+          let reasonText = "";
+          if (!isAssigned) {
+            if (backendReason) reasonText = backendReason;
+            else if (isQualified) reasonText = "You qualified, but the bot did not assign this role (check bot permissions / role hierarchy).";
+            else reasonText = "Not eligible based on your verification.";
+          } else {
+            // If assigned, optionally show why/how
+            if (backendReason) reasonText = backendReason;
+            else if (isQualified) reasonText = "Qualified and successfully assigned.";
+            else reasonText = "Assigned by the bot.";
+          }
+
+          const unlocks = role.unlocks.join(" + ");
+
+          const item = document.createElement("div");
+          item.className = "role-item";
+          item.innerHTML = `
+            <div class="role-badge ${badgeClass}">${badgeText}</div>
+            <div class="role-meta">
+              <p class="role-name">${role.display}${isQualified && !isAssigned ? " (Qualified)" : ""}</p>
+              <p class="role-unlocks"><strong>Unlocks:</strong> ${unlocks}</p>
+              <p class="role-reason"><strong>Why:</strong> ${reasonText}</p>
+            </div>
+          `;
+          list.appendChild(item);
+        });
+
+        panel.style.display = "block";
+
+        // Build a concise summary line for the main status text
+        const assignedPretty = ROLE_DEFS
+          .filter(r => effectiveAssigned.has(r.key) || effectiveAssigned.has(normRoleKey(r.display)))
+          .map(r => r.display);
+
+        const qualifiedPretty = ROLE_DEFS
+          .filter(r => effectiveQualified.has(r.key) || effectiveQualified.has(normRoleKey(r.display)))
+          .map(r => r.display);
+
+        return { assignedPretty, qualifiedPretty };
+      }
       async function submitSignature(sig) {
         step3.classList.add("active");
         btn.classList.remove("loading");
@@ -285,13 +486,18 @@
           const result = await resp.json();
           if (result.success) {
             step4.classList.add("active");
-            setStatus("✅ Verified! Role assigned. Private channel will auto-delete.");
+            const summary = renderRolePanel(result) || { assignedPretty: [], qualifiedPretty: [] };
+            const q = summary.qualifiedPretty.length ? summary.qualifiedPretty.join(", ") : "—";
+            const a = summary.assignedPretty.length ? summary.assignedPretty.join(", ") : "—";
+            setStatus(`✅ Verified!\nQualified for: ${q}\nAssigned: ${a}\n\nThis private channel will auto-delete.`);
           } else {
             setStatus("❌ Verification failed: " + (result.error || "Unknown error"));
+            const rp = document.getElementById("rolePanel"); if (rp) rp.style.display = "none";
           }
         } catch (err) {
           console.error(err);
           setStatus("❌ Error submitting signature: " + (err.message || err));
+          const rp = document.getElementById("rolePanel"); if (rp) rp.style.display = "none";
         }
       }
 
