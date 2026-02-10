@@ -185,74 +185,6 @@
       word-break: break-word;
       font-family: monospace;
     }
-
-    /* role assignment panel */
-    .role-panel {
-      margin-top: 22px;
-      padding-top: 18px;
-      border-top: 1px solid rgba(0,0,0,0.08);
-    }
-    .role-title {
-      margin: 0 0 6px;
-      font-size: 1.15rem;
-      color: var(--text-color);
-    }
-    .role-subtitle {
-      margin: 0 0 14px;
-      color: rgba(17,17,17,0.7);
-      font-size: 0.95rem;
-      line-height: 1.35;
-    }
-    .role-list { display: flex; flex-direction: column; gap: 10px; }
-    .role-item {
-      border: 1px solid rgba(0,0,0,0.08);
-      border-radius: 12px;
-      padding: 12px 14px;
-      display: flex;
-      gap: 12px;
-      align-items: flex-start;
-    }
-    .role-badge {
-      min-width: 86px;
-      text-align: center;
-      font-weight: 800;
-      font-size: 0.75rem;
-      padding: 8px 10px;
-      border-radius: 999px;
-      align-self: center;
-      user-select: none;
-    }
-    .role-badge.assigned {
-      background: rgba(99,173,20,0.14);
-      color: var(--success);
-      border: 1px solid rgba(99,173,20,0.35);
-    }
-    .role-badge.not-assigned {
-      background: rgba(0,0,0,0.05);
-      color: rgba(17,17,17,0.75);
-      border: 1px solid rgba(0,0,0,0.12);
-    }
-    .role-meta { flex: 1; }
-    .role-name {
-      margin: 0;
-      font-size: 1rem;
-      color: var(--text-color);
-      font-weight: 750;
-      letter-spacing: 0.2px;
-    }
-    .role-unlocks, .role-reason {
-      margin: 4px 0 0;
-      font-size: 0.92rem;
-      line-height: 1.35;
-    }
-    .role-unlocks { color: rgba(17,17,17,0.78); }
-    .role-reason { color: rgba(17,17,17,0.62); }
-    .role-reason strong { color: rgba(17,17,17,0.78); }
-    .role-footnote {
-      margin: 14px 0 0;
-      font-size: 0.9rem;
-      color: rgba(17,17,17,0.7);
-    }
   </style>
 </head>
 <body>
@@ -300,12 +232,6 @@
 
   <p id="status"></p>
   <p id="signature"></p>
-
-  <div id="rolePanel" class="role-panel" style="display:none;">
-    <h2 class="role-title"></h2>
-    <p class="role-subtitle"></p>
-    <div id="roleList" class="role-list"></div>
-  </div>
 </main>
 
 <script src="https://cdn.jsdelivr.net/npm/ethers@6.9.0/dist/ethers.umd.min.js"></script>
@@ -352,16 +278,13 @@
     let sessionWallet = null;           // expected wallet for current /verify session (lowercased)
     let walletChangeRequested = false;  // user clicked "Change wallet"
     let uiUpdatedAssigned = false;      // show "ASSIGNED (UPDATED)" after reconnect/refresh
+    let lastStatus = null;              // last /api/status payload
 
     function setStatus(t) { status.innerText = t; }
-
     function updateStep(stepNum) {
-      [step1, step2, step3, step4].forEach((el, idx) => {
-        el.classList.toggle("active", idx < stepNum);
-      });
+      [step1, step2, step3, step4].forEach((el, idx) => el.classList.toggle("active", idx < stepNum));
     }
 
-    // ---- Wallet UI ----
     const walletRow = document.getElementById("walletRow");
     const linkedWalletEl = document.getElementById("linkedWallet");
     const connectedWalletNowEl = document.getElementById("connectedWalletNow");
@@ -381,50 +304,51 @@
       if (walletRow) walletRow.style.display = "block";
     }
 
-    async function loadStatus(opts = {}) {
+    function parseRoleList(v) {
+      if (!v) return [];
+      if (Array.isArray(v)) return v.map(String);
+      if (typeof v === "string") return v.split(",").map(s => s.trim()).filter(Boolean);
+      if (typeof v === "object") return Object.entries(v).filter(([_, val]) => !!val).map(([k]) => k);
+      return [];
+    }
+
+    function hasAnyRoles(result) {
+      const assigned = parseRoleList(result?.assignedRoles || result?.rolesAssigned || result?.roles || result?.assigned);
+      return assigned.length > 0;
+    }
+
+    async function loadStatus() {
       try {
-        if (!userId) return;
+        if (!userId) return null;
 
         const resp = await fetch("https://human-tech-bot.onrender.com/api/status?userId=" + encodeURIComponent(userId.toString()), {
           method: "GET",
           headers: { "Accept": "application/json" }
         });
         const result = await resp.json();
+        lastStatus = result;
 
         if (result && result.success) {
           const wallet = result?.inputs?.wallet || result?.wallet || null;
           sessionWallet = wallet ? String(wallet).toLowerCase() : null;
           if (wallet) showLinkedWallet(wallet);
 
-          const hasRoles =
-            (Array.isArray(result?.assignedRoles) && result.assignedRoles.length > 0) ||
-            (Array.isArray(result?.roles) && result.roles.length > 0) ||
-            (typeof result?.roles === "string" && result.roles.trim().length > 0);
-
-          if (hasRoles) {
-            renderRolePanel(result, {
-              updatedAssigned: !!opts.highlightUpdated || uiUpdatedAssigned,
-              addedRoles: opts.highlightAdded || []
-            });
-          }
-
-          if (result?.activeVerification) {
-            updateStep(1);
-            btn.style.display = "block";
-            document.querySelector(".wallet-btns").style.display = "flex";
-            setStatus("Ready. Choose a wallet then click Connect & Sign.");
-            return;
-          }
-
-          if (hasRoles) {
+          // If not active and roles exist, hide connect/sign unless changing wallet
+          if (!result?.activeVerification && hasAnyRoles(result) && !walletChangeRequested) {
             btn.style.display = "none";
             document.querySelector(".wallet-btns").style.display = "none";
             updateStep(4);
             setStatus("This private channel will auto-delete.");
+          } else {
+            btn.style.display = "block";
+            document.querySelector(".wallet-btns").style.display = "flex";
           }
         }
+
+        return result;
       } catch (e) {
         console.warn("Status load failed:", e?.message || e);
+        return null;
       }
     }
 
@@ -438,112 +362,13 @@
       });
     }
 
-    // ---- Role assignment UX ----
-    const ROLE_DEFS = [
-      { key: "chosen_one", display: "Chosen One", unlocks: ['"the chosen people" channel'], covenant: false },
-      { key: "og_humn", display: "O.G. HUMN", unlocks: ['"og humns" channel'], covenant: false },
-      { key: "covenant_signatory_og", display: "Covenant Signatory O.G.", unlocks: ["covenant discussion channel", "meme contest channel"], covenant: true },
-      { key: "covenant_verified_signatory", display: "Covenant Verified Signatory", unlocks: ["covenant discussion channel", "meme contest channel"], covenant: true }
-    ];
-
-    function normRoleKey(r) {
-      return (r || "")
-        .toString()
-        .trim()
-        .toLowerCase()
-        .replace(/\s+/g, "_")
-        .replace(/[^a-z0-9_]/g, "");
-    }
-
-    function parseRoleList(v) {
-      if (!v) return [];
-      if (Array.isArray(v)) return v.map(normRoleKey).filter(Boolean);
-      if (typeof v === "string") return v.split(",").map(normRoleKey).filter(Boolean);
-      if (typeof v === "object") {
-        return Object.entries(v).filter(([_, val]) => !!val).map(([k]) => normRoleKey(k));
-      }
-      return [];
-    }
-
-    function renderRolePanel(result, opts = {}) {
-      const updatedAssigned = !!opts.updatedAssigned;
-      const addedRoles = (opts.addedRoles || []).map(normRoleKey);
-
-      const panel = document.getElementById("rolePanel");
-      const list = document.getElementById("roleList");
-      if (!panel || !list) return;
-
-      const assigned = parseRoleList(result?.assignedRoles || result?.rolesAssigned || result?.roles || result?.assigned);
-      const qualified = parseRoleList(result?.qualifiedRoles || result?.qualified || result?.eligibleRoles);
-      const reasons = result?.roleReasons || result?.reasons || result?.ineligibleReasons || {};
-
-      const qualifiedOne = normRoleKey(result?.qualifiedRole || result?.roleQualifiedFor || result?.qualified_for);
-      if (qualifiedOne && !qualified.includes(qualifiedOne)) qualified.push(qualifiedOne);
-
-      const effectiveAssigned = new Set(assigned);
-      const effectiveQualified = new Set(qualified);
-
-      list.innerHTML = "";
-
-      ROLE_DEFS.forEach((role) => {
-        const isAssigned = effectiveAssigned.has(role.key) || effectiveAssigned.has(normRoleKey(role.display));
-        const isQualified = effectiveQualified.has(role.key) || effectiveQualified.has(normRoleKey(role.display));
-
-        const wasAdded = isAssigned && addedRoles.includes(role.key);
-        const badgeText = isAssigned
-          ? (wasAdded ? "ASSIGNED (ADDED)" : (updatedAssigned ? "ASSIGNED (UPDATED)" : "ASSIGNED"))
-          : "NOT ASSIGNED";
-        const badgeClass = isAssigned ? "assigned" : "not-assigned";
-
-        const backendReason =
-          reasons?.[role.key] ||
-          reasons?.[role.display] ||
-          reasons?.[normRoleKey(role.display)] ||
-          reasons?.[role.key.toUpperCase()] ||
-          "";
-
-        let reasonText = "";
-        if (!isAssigned) {
-          if (backendReason) reasonText = backendReason;
-          else if (isQualified) reasonText = "You qualified, but the bot did not assign this role (check bot permissions / role hierarchy).";
-          else {
-            if (role.key === "chosen_one") reasonText = "Human Passport score is below 70.";
-            else if (role.key === "og_humn") reasonText = "Human Passport score is below 20.";
-            else reasonText = "Not eligible based on your verification.";
-          }
-
-          if (role.key === "covenant_signatory_og" && !backendReason && !isQualified) {
-            reasonText = "You do not own the limited edition Human Tech Covenant Signatory.";
-          }
-          if (role.key === "covenant_verified_signatory" && !backendReason && !isQualified) {
-            reasonText = "You are not verified as a signatory (not found in the manifest whitelist).";
-          }
-        }
-
-        const unlocks = role.unlocks.join(" + ");
-
-        const item = document.createElement("div");
-        item.className = "role-item";
-        item.innerHTML = `
-          <div class="role-badge ${badgeClass}">${badgeText}</div>
-          <div class="role-meta">
-            <p class="role-name">${role.display}${wasAdded ? " (Added)" : ""}${isQualified && !isAssigned ? " (Qualified)" : ""}</p>
-            <p class="role-unlocks"><strong>Unlocks:</strong> ${unlocks}</p>
-            ${!isAssigned ? `<p class="role-reason"><strong>Why:</strong> ${reasonText}</p>` : ``}
-          </div>
-        `;
-        list.appendChild(item);
-      });
-
-      panel.style.display = "block";
-    }
-
     async function submitSignature(sig) {
       step3.classList.add("active");
       btn.classList.remove("loading");
       try {
         sigOutput.innerText = sig;
         setStatus("Submitting signature to bot...");
+
         const resp = await fetch("https://human-tech-bot.onrender.com/api/signature", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -553,7 +378,6 @@
 
         if (result.success) {
           step4.classList.add("active");
-          renderRolePanel(result);
           const wallet = result?.inputs?.wallet || result?.wallet;
           if (wallet) showLinkedWallet(wallet);
           btn.style.display = "none";
@@ -562,16 +386,32 @@
           return;
         }
 
-        setStatus("❌ Verification failed: " + (result.error || "No active verification"));
-        const rp = document.getElementById("rolePanel"); if (rp) rp.style.display = "none";
+        // Retry-safe: if session is gone but roles exist, show them instead of failing
+        const errMsg = (result?.error || "").toLowerCase();
+        if (errMsg.includes("no active verification")) {
+          const s = await loadStatus();
+          if (s && s.success && hasAnyRoles(s)) {
+            step4.classList.add("active");
+            btn.style.display = "none";
+            document.querySelector(".wallet-btns").style.display = "none";
+            setStatus("This private channel will auto-delete.");
+            return;
+          }
+          setStatus("❌ No active verification session found. Please run /verify again to generate a fresh link.");
+          return;
+        }
+
+        setStatus("❌ Verification failed: " + (result.error || "Unknown error"));
       } catch (err) {
         console.error(err);
         setStatus("❌ Error submitting signature: " + (err.message || err));
-        const rp = document.getElementById("rolePanel"); if (rp) rp.style.display = "none";
       }
     }
 
     async function signChallenge() {
+      if (!challenge) {
+        throw new Error("No challenge in the URL. Please run /verify again to generate a fresh link.");
+      }
       step2.classList.add("active");
       const sig = await signer.signMessage(challenge);
       await submitSignature(sig);
@@ -586,11 +426,9 @@
 
     async function connectWithAppKit() {
       if (!window.__reown?.createAppKit) throw new Error("Reown AppKit not loaded. Did /vendor/wallets.bundle.js build and deploy?");
-
       if (!appkit) {
         const { createAppKit, EthersAdapter, mainnet, base } = window.__reown;
         const ethersAdapter = new EthersAdapter();
-
         appkit = createAppKit({
           adapters: [ethersAdapter],
           networks: [mainnet, base],
@@ -619,7 +457,6 @@
       });
 
       appkit.close();
-
       const provider = new ethers.BrowserProvider(eip155Provider);
       await provider.send("eth_requestAccounts", []);
       return provider.getSigner();
@@ -627,7 +464,6 @@
 
     async function connectWaaP() {
       if (!window.__initWaaP) throw new Error("WaaP SDK not loaded. Did /vendor/wallets.bundle.js build and deploy?");
-
       window.__initWaaP({
         config: { authenticationMethods: ["wallet"], styles: { darkMode: false } },
         walletConnectProjectId: WALLETCONNECT_PROJECT_ID,
@@ -635,7 +471,6 @@
       });
 
       if (!window.waap?.login) throw new Error("WaaP did not initialize (window.waap missing).");
-
       const loginType = await window.waap.login();
       if (!loginType) throw new Error("WaaP login cancelled.");
 
@@ -654,12 +489,21 @@
       setStatus("Connecting...");
 
       try {
+        // IMPORTANT: fetch latest session info BEFORE wallet connect/sign
+        await loadStatus();
+
+        if (lastStatus && lastStatus.success && !lastStatus.activeVerification && !hasAnyRoles(lastStatus)) {
+          btn.classList.remove("loading");
+          setStatus("❌ No active verification session found. Please run /verify again to generate a fresh link.");
+          return;
+        }
+
         if (selected === "injected") signer = await connectInjected();
         else if (selected === "walletconnect") signer = await connectWithAppKit();
         else if (selected === "waap") signer = await connectWaaP();
         else throw new Error("Unknown wallet selection.");
 
-        // Always define + show connected wallet (fixes addr undefined + ensures UI shows even same-wallet)
+        // Always show the wallet the user just connected
         const addr = await signer.getAddress();
         const addrLower = String(addr).toLowerCase();
         showConnectedWalletNow(addr);
@@ -694,16 +538,13 @@
           if (added.length > 0) setStatus("✅ Roles updated. Added: " + added.join(", "));
           else setStatus("✅ Roles up to date. No new roles were added.");
 
-          renderRolePanel(data2, { updatedAssigned: true, addedRoles: added });
           updateStep(4);
           btn.classList.remove("loading");
-
           btn.style.display = "none";
           document.querySelector(".wallet-btns").style.display = "none";
           return;
         }
 
-        // Otherwise normal signature flow
         setStatus("Wallet connected. Awaiting signature approval...");
         await signChallenge();
       } catch (err) {
