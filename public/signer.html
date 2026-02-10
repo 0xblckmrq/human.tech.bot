@@ -272,18 +272,24 @@
 
     <p>Connect your wallet used for the covenant and sign the challenge below.</p>
 
+    
     <div id="walletRow" style="display:none; margin: 14px 0 18px; padding: 12px 14px; border: 1px solid rgba(0,0,0,0.08); border-radius: 12px; background: rgba(52,88,234,0.04);">
       <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
-        <div style="min-width: 240px;">
-          <div style="font-size:0.85rem; color: rgba(17,17,17,0.65); margin-bottom:4px;">Connected wallet</div>
-          <div id="connectedWallet" style="font-family: monospace; font-size:0.95rem; word-break: break-all;"></div>
+        <div style="min-width: 280px; flex: 1;">
+          <div style="font-size:0.85rem; color: rgba(17,17,17,0.65); margin-bottom:4px;">Linked wallet (current)</div>
+          <div id="linkedWallet" style="font-family: monospace; font-size:0.95rem; word-break: break-all;"></div>
+
+          <div id="connectedWalletWrap" style="margin-top:10px; display:none;">
+            <div style="font-size:0.85rem; color: rgba(17,17,17,0.65); margin-bottom:4px;">Wallet you just connected</div>
+            <div id="connectedWalletNow" style="font-family: monospace; font-size:0.95rem; word-break: break-all;"></div>
+          </div>
         </div>
+
         <button id="changeWalletBtn" type="button" style="padding:10px 14px; border-radius:10px; border: 1px solid rgba(0,0,0,0.12); background:#fff; cursor:pointer; font-weight:700;">
           Change wallet
         </button>
       </div>
     </div>
-
 
     <div class="wallet-btns">
       <button class="wallet-btn injected" id="btnInjected" type="button">Browser Wallet</button>
@@ -368,7 +374,9 @@
 
       // ---- Status (no signing needed) + Change wallet ----
       const walletRow = document.getElementById("walletRow");
-      const connectedWalletEl = document.getElementById("connectedWallet");
+      const linkedWalletEl = document.getElementById("linkedWallet");
+      const connectedWalletNowEl = document.getElementById("connectedWalletNow");
+      const connectedWalletWrap = document.getElementById("connectedWalletWrap");
       const changeWalletBtn = document.getElementById("changeWalletBtn");
 
       function shortAddr(a) {
@@ -379,15 +387,28 @@
       }
 
       function showLinkedWallet(wallet) {
-        if (!walletRow || !connectedWalletEl) return;
-        connectedWalletEl.innerText = wallet;
+        if (!walletRow || !linkedWalletEl) return;
+        linkedWalletEl.innerText = wallet;
         walletRow.style.display = "block";
+      }
+
+      function showConnectedWalletNow(wallet) {
+        if (!connectedWalletWrap || !connectedWalletNowEl) return;
+        connectedWalletNowEl.innerText = wallet;
+        connectedWalletWrap.style.display = "block";
+      }
+
+      function hideConnectedWalletNow() {
+        if (!connectedWalletWrap) return;
+        connectedWalletWrap.style.display = "none";
+        if (connectedWalletNowEl) connectedWalletNowEl.innerText = "";
       }
 
       function hideLinkedWallet() {
         if (!walletRow) return;
         walletRow.style.display = "none";
-        if (connectedWalletEl) connectedWalletEl.innerText = "";
+        if (linkedWalletEl) linkedWalletEl.innerText = "";
+        hideConnectedWalletNow();
       }
 
       async function loadStatus() {
@@ -523,6 +544,7 @@
 
       function renderRolePanel(result, opts = {}) {
         const updatedAssigned = !!opts.updatedAssigned;
+        const addedRoles = (opts.addedRoles || []).map(normRoleKey);
         const panel = document.getElementById("rolePanel");
         const list = document.getElementById("roleList");
         if (!panel || !list) return;
@@ -545,8 +567,9 @@
           const isAssigned = effectiveAssigned.has(role.key) || effectiveAssigned.has(normRoleKey(role.display));
           const isQualified = effectiveQualified.has(role.key) || effectiveQualified.has(normRoleKey(role.display));
 
+          const wasAdded = isAssigned && addedRoles.includes(role.key);
           const badgeText = isAssigned
-            ? (updatedAssigned ? "ASSIGNED (UPDATED)" : "ASSIGNED")
+            ? (wasAdded ? "ASSIGNED (ADDED)" : (updatedAssigned ? "ASSIGNED (UPDATED)" : "ASSIGNED"))
             : "NOT ASSIGNED";
           const badgeClass = isAssigned ? "assigned" : "not-assigned";
 
@@ -595,7 +618,7 @@
           item.innerHTML = `
             <div class="role-badge ${badgeClass}">${badgeText}</div>
             <div class="role-meta">
-              <p class="role-name">${role.display}${isQualified && !isAssigned ? " (Qualified)" : ""}</p>
+              <p class="role-name">${role.display}${wasAdded ? " (Added)" : ""}${isQualified && !isAssigned ? " (Qualified)" : ""}</p>
               <p class="role-unlocks"><strong>Unlocks:</strong> ${unlocks}</p>
               ${!isAssigned ? `<p class="role-reason"><strong>Why:</strong> ${reasonText}</p>` : ``}
             </div>
@@ -777,26 +800,55 @@
           else if (selected === "waap") signer = await connectWaaP();
           else throw new Error("Unknown wallet selection.");
 
-          // If the user is reconnecting the same wallet already linked for this /verify session,
-          // no re-verification is needed. Refresh role status and mark UI as updated.
-          let addr = null;
-          try { addr = await signer.getAddress(); } catch (_) {}
-          const addrLower = addr ? String(addr).toLowerCase() : null;
+          // Always show which wallet was connected in this attempt
+          if (addr) showConnectedWalletNow(addr);
+
+          // If user connects the SAME wallet as the current linked wallet for this /verify session,
+          // do NOT request a signature again. Instead, confirm and auto-reconcile roles.
           const sameWallet = !!(addrLower && sessionWallet && addrLower === sessionWallet);
 
-          if (sameWallet && hasRolesInLastStatus) {
+          if (sameWallet && !walletChangeRequested) {
+            setStatus("Same wallet detected. Updating roles (no signature needed)...");
+            updateStep(3);
+
+            const resp2 = await fetch("https://human-tech-bot.onrender.com/api/confirm-wallet", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "Accept": "application/json" },
+              body: JSON.stringify({ userId: userId, wallet: addrLower })
+            });
+
+            const data2 = await resp2.json().catch(() => ({}));
+            if (!data2 || !data2.success) {
+              btn.classList.remove("loading");
+              setStatus("❌ Could not update roles automatically: " + (data2?.error || "Unknown error"));
+              // Fall back to signing (if they want to proceed anyway)
+              setStatus((data2?.error ? ("❌ " + data2.error + "\n") : "") + "If you want to change the linked wallet, click “Change wallet” and sign again.");
+              return;
+            }
+
             uiUpdatedAssigned = true;
             walletChangeRequested = false;
-            btn.classList.remove("loading");
+
+            const added = Array.isArray(data2.addedRoles) ? data2.addedRoles : [];
+            if (added.length > 0) {
+              setStatus("✅ Roles updated. Added: " + added.join(", "));
+            } else {
+              setStatus("✅ Roles up to date. No new roles were added.");
+            }
+
+            // Render roles immediately from response + refresh status to reflect final state
+            renderRolePanel(data2, { updatedAssigned: true, addedRoles: added });
             updateStep(4);
-            setStatus("Wallet reconnected. No re-verification needed — status refreshed.");
-            await loadStatus();
-            // Keep UI minimal after refresh
+            btn.classList.remove("loading");
+
+            // Keep wallet UI visible + allow changing wallet
+            walletRow.style.display = "block";
             btn.style.display = "none";
             document.querySelector(".wallet-btns").style.display = "none";
             return;
           }
 
+          // Otherwise proceed with normal signature flow (new wallet OR user explicitly chose "Change wallet")
           setStatus("Wallet connected. Awaiting signature approval...");
           await signChallenge();
         } catch (err) {
