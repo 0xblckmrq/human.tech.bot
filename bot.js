@@ -439,6 +439,59 @@ client.on("interactionCreate", async interaction => {
     }
     cooldowns.set(userId, now);
 
+    // Fast-path: if this user has already verified this SAME wallet before, refresh roles immediately.
+    // Use a private channel for the refresh results so it doesn't clutter the main chat.
+    const storedWallet = getVerifiedWallet(userId);
+    if (storedWallet && storedWallet.toLowerCase() === wallet) {
+      try {
+        const member2 = await guild.members.fetch(userId);
+        const roleReport = await applyRolesForMember(guild, member2, wallet);
+
+        const channel = await guild.channels.create({
+          name: `verify-${member.user.username}`,
+          type: ChannelType.GuildText,
+          permissionOverwrites: [
+            { id: guild.roles.everyone, deny: [PermissionsBitField.Flags.ViewChannel] },
+            { id: member.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] },
+            { id: client.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] }
+          ]
+        });
+
+        await channel.send(
+          `✅ **Roles refreshed (no re-sign needed)**
+
+` +
+          `🔗 Wallet: **${wallet}**
+` +
+          `🧮 Passport score: **${Number(roleReport?.inputs?.passportScore ?? 0)}**
+` +
+          `🎨 NFT holder: **${(roleReport?.inputs?.nftHolder) ? "Yes" : "No"}**
+` +
+          `🏷 Roles granted: **${roleReport.assignedRoles.join(", ") || "None"}**
+
+` +
+          `**Role status:**
+` +
+          Object.keys(ROLE_RULES).map(rn => {
+            if (roleReport.assignedRoles.includes(rn)) return `✅ ${rn} — unlocks ${ROLE_RULES[rn].unlocks.join(" + ")}`;
+            const reason = roleReport.notAssigned[rn] || "Not assigned";
+            return `❌ ${rn} — ${reason} — unlocks ${ROLE_RULES[rn].unlocks.join(" + ")}`;
+          }).join("
+") +
+          `
+
+Channel will close shortly…`
+        );
+
+        setTimeout(() => channel.delete().catch(() => {}), VERIFIED_CLOSE_MS);
+
+        return interaction.editReply({ content: `✅ Role refresh channel created: ${channel}` });
+      } catch (e) {
+        console.error("Same-wallet refresh failed:", e.message);
+        return interaction.editReply({ content: "❌ Failed to refresh roles. Please try again shortly." });
+      }
+    }
+
     const list = await fetchWhitelist();
     const entry = list.find(w =>
       w.walletAddress?.toLowerCase() === wallet &&
