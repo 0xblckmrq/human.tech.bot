@@ -629,12 +629,9 @@ app.get("/api/status", async (req, res) => {
 
 
 
-// ===== CONFIRM WALLET ENDPOINT (no re-sign needed for same wallet) =====
-// If the user has an active /verify session and connects the SAME wallet, we can:
-// - persist the wallet
-// - clear the active challenge session
-// - reconcile roles immediately
-// Returns which roles were newly added by the reconciliation.
+// ===== CONFIRM WALLET ENDPOINT (same wallet, no re-sign) =====
+// Allows the signer UI to refresh roles immediately when a user reconnects the SAME wallet.
+// This does NOT change the linked wallet; it only refreshes roles for the wallet already on record.
 app.post("/api/confirm-wallet", async (req, res) => {
   const userId = (req.body?.userId || "").toString();
   const wallet = (req.body?.wallet || "").toString().toLowerCase();
@@ -643,39 +640,31 @@ app.post("/api/confirm-wallet", async (req, res) => {
   if (!wallet) return res.status(400).json({ success: false, error: "Missing wallet" });
 
   try {
-    const active = challenges.get(userId.toString());
-    if (!active || !active.wallet) {
-      return res.status(400).json({ success: false, error: "No active verification session" });
-    }
-
-    const expected = active.wallet.toString().toLowerCase();
-    if (wallet !== expected) {
+    const storedWallet = getVerifiedWallet(userId);
+    if (!storedWallet) {
       return res.status(400).json({
         success: false,
-        error: "Wallet mismatch",
-        expectedWallet: expected,
-        receivedWallet: wallet
+        error: "No wallet on record. Please run /verify first."
+      });
+    }
+
+    if (storedWallet.toLowerCase() !== wallet) {
+      return res.status(400).json({
+        success: false,
+        error: "Wallet mismatch. Please use Change or reconnect wallet and sign again."
       });
     }
 
     const guild = client.guilds.cache.get(GUILD_ID);
     const member = await guild.members.fetch(userId);
 
-    // Snapshot current assigned roles (managed set only)
-    const managed = ["Covenant Verified Signatory", "Covenant Signatory O.G.", "Chosen One", "O.G. HUMN"];
-    const assignedBefore = [];
-    for (const rn of managed) {
-      const roleObj = guild.roles.cache.find(r => r.name === rn);
-      if (roleObj && member.roles.cache.has(roleObj.id)) assignedBefore.push(rn);
-    }
+    // Snapshot current roles (for 'addedRoles' reporting)
+    const before = getAssignedRoleNames(member);
 
-    // Persist wallet and end the active verification session
-    upsertVerifiedUser(userId, wallet);
-    challenges.delete(userId.toString());
-
-    // Reconcile roles
+    // Reconcile roles for the stored wallet
     const roleReport = await applyRolesForMember(guild, member, wallet);
-    const addedRoles = roleReport.assignedRoles.filter(r => !assignedBefore.includes(r));
+
+    const addedRoles = roleReport.assignedRoles.filter(r => !before.has(r));
 
     return res.json({
       success: true,
@@ -689,9 +678,10 @@ app.post("/api/confirm-wallet", async (req, res) => {
     });
   } catch (e) {
     console.error("confirm-wallet failed:", e.message);
-    return res.status(500).json({ success: false, error: "Failed to confirm wallet" });
+    return res.status(500).json({ success: false, error: "Failed to refresh roles" });
   }
 });
+
 
 // ===== ALCHEMY WEBHOOK (NFT transfers → revoke/grant Covenant Signatory O.G.) =====
 // Configure Alchemy Notify webhooks for:
