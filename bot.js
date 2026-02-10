@@ -439,6 +439,15 @@ client.on("interactionCreate", async interaction => {
     }
     cooldowns.set(userId, now);
 
+    const list = await fetchWhitelist();
+    const entry = list.find(w =>
+      w.walletAddress?.toLowerCase() === wallet &&
+      w.covenantStatus?.toUpperCase() === "SIGNED" &&
+      w.humanityStatus?.toUpperCase() === "VERIFIED"
+    );
+
+    if (!entry) return interaction.editReply({ content: "❌ Wallet not eligible: must be SIGNED + VERIFIED." });
+
     try {
       const channel = await guild.channels.create({
         name: `verify-${member.user.username}`,
@@ -565,13 +574,29 @@ app.get("/api/status", async (req, res) => {
     const guild = client.guilds.cache.get(GUILD_ID);
     const member = await guild.members.fetch(userId);
 
-    const wallet = getVerifiedWallet(userId);
     const assigned = [];
     const managed = ["Covenant Verified Signatory", "Covenant Signatory O.G.", "Chosen One", "O.G. HUMN"];
     for (const rn of managed) {
       const roleObj = guild.roles.cache.find(r => r.name === rn);
       if (roleObj && member.roles.cache.has(roleObj.id)) assigned.push(rn);
     }
+
+    // If there's an active /verify session, surface the expected wallet and DO NOT
+    // reconcile/assign roles without a fresh signature.
+    const active = challenges.get(userId.toString());
+    if (active && active.wallet) {
+      return res.json({
+        success: true,
+        activeVerification: true,
+        assignedRoles: assigned,
+        qualifiedRoles: [],
+        notAssigned: {},
+        unlocks: Object.fromEntries(Object.entries(ROLE_RULES).map(([k,v]) => [k, v.unlocks])),
+        inputs: { wallet: active.wallet.toLowerCase() }
+      });
+    }
+
+    const wallet = getVerifiedWallet(userId);
 
     // If we have a wallet, compute eligibility + reasons and (optionally) reconcile roles
     if (wallet) {
@@ -601,6 +626,72 @@ app.get("/api/status", async (req, res) => {
   }
 });
 
+
+
+
+// ===== CONFIRM WALLET ENDPOINT (no re-sign needed for same wallet) =====
+// If the user has an active /verify session and connects the SAME wallet, we can:
+// - persist the wallet
+// - clear the active challenge session
+// - reconcile roles immediately
+// Returns which roles were newly added by the reconciliation.
+app.post("/api/confirm-wallet", async (req, res) => {
+  const userId = (req.body?.userId || "").toString();
+  const wallet = (req.body?.wallet || "").toString().toLowerCase();
+
+  if (!userId) return res.status(400).json({ success: false, error: "Missing userId" });
+  if (!wallet) return res.status(400).json({ success: false, error: "Missing wallet" });
+
+  try {
+    const active = challenges.get(userId.toString());
+    if (!active || !active.wallet) {
+      return res.status(400).json({ success: false, error: "No active verification session" });
+    }
+
+    const expected = active.wallet.toString().toLowerCase();
+    if (wallet !== expected) {
+      return res.status(400).json({
+        success: false,
+        error: "Wallet mismatch",
+        expectedWallet: expected,
+        receivedWallet: wallet
+      });
+    }
+
+    const guild = client.guilds.cache.get(GUILD_ID);
+    const member = await guild.members.fetch(userId);
+
+    // Snapshot current assigned roles (managed set only)
+    const managed = ["Covenant Verified Signatory", "Covenant Signatory O.G.", "Chosen One", "O.G. HUMN"];
+    const assignedBefore = [];
+    for (const rn of managed) {
+      const roleObj = guild.roles.cache.find(r => r.name === rn);
+      if (roleObj && member.roles.cache.has(roleObj.id)) assignedBefore.push(rn);
+    }
+
+    // Persist wallet and end the active verification session
+    upsertVerifiedUser(userId, wallet);
+    challenges.delete(userId.toString());
+
+    // Reconcile roles
+    const roleReport = await applyRolesForMember(guild, member, wallet);
+    const addedRoles = roleReport.assignedRoles.filter(r => !assignedBefore.includes(r));
+
+    return res.json({
+      success: true,
+      sameWallet: true,
+      addedRoles,
+      assignedRoles: roleReport.assignedRoles,
+      qualifiedRoles: roleReport.qualifiedRoles,
+      notAssigned: roleReport.notAssigned,
+      unlocks: roleReport.unlocks,
+      inputs: roleReport.inputs
+    });
+  } catch (e) {
+    console.error("confirm-wallet failed:", e.message);
+    return res.status(500).json({ success: false, error: "Failed to confirm wallet" });
+  }
+});
 
 // ===== ALCHEMY WEBHOOK (NFT transfers → revoke/grant Covenant Signatory O.G.) =====
 // Configure Alchemy Notify webhooks for:
