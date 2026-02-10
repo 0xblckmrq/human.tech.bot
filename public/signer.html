@@ -99,7 +99,6 @@
     .step:last-child::after { display: none; }
     .step.active + .step::after { background: var(--highlight); }
 
-    /* wallet buttons UI */
     .wallet-btns {
       display: flex;
       gap: 10px;
@@ -274,11 +273,9 @@
     let selected = "injected";
     let appkit = null;
 
-    // Wallet/session UI state
-    let sessionWallet = null;           // expected wallet for current /verify session (lowercased)
-    let walletChangeRequested = false;  // user clicked "Change wallet"
-    let uiUpdatedAssigned = false;      // show "ASSIGNED (UPDATED)" after reconnect/refresh
-    let lastStatus = null;              // last /api/status payload
+    let sessionWallet = null;
+    let walletChangeRequested = false;
+    let lastStatus = null;
 
     function setStatus(t) { status.innerText = t; }
     function updateStep(stepNum) {
@@ -304,23 +301,9 @@
       if (walletRow) walletRow.style.display = "block";
     }
 
-    function parseRoleList(v) {
-      if (!v) return [];
-      if (Array.isArray(v)) return v.map(String);
-      if (typeof v === "string") return v.split(",").map(s => s.trim()).filter(Boolean);
-      if (typeof v === "object") return Object.entries(v).filter(([_, val]) => !!val).map(([k]) => k);
-      return [];
-    }
-
-    function hasAnyRoles(result) {
-      const assigned = parseRoleList(result?.assignedRoles || result?.rolesAssigned || result?.roles || result?.assigned);
-      return assigned.length > 0;
-    }
-
     async function loadStatus() {
       try {
         if (!userId) return null;
-
         const resp = await fetch("https://human-tech-bot.onrender.com/api/status?userId=" + encodeURIComponent(userId.toString()), {
           method: "GET",
           headers: { "Accept": "application/json" }
@@ -332,17 +315,6 @@
           const wallet = result?.inputs?.wallet || result?.wallet || null;
           sessionWallet = wallet ? String(wallet).toLowerCase() : null;
           if (wallet) showLinkedWallet(wallet);
-
-          // If not active and roles exist, hide connect/sign unless changing wallet
-          if (!result?.activeVerification && hasAnyRoles(result) && !walletChangeRequested) {
-            btn.style.display = "none";
-            document.querySelector(".wallet-btns").style.display = "none";
-            updateStep(4);
-            setStatus("This private channel will auto-delete.");
-          } else {
-            btn.style.display = "block";
-            document.querySelector(".wallet-btns").style.display = "flex";
-          }
         }
 
         return result;
@@ -355,7 +327,6 @@
     if (changeWalletBtn) {
       changeWalletBtn.addEventListener("click", () => {
         walletChangeRequested = true;
-        uiUpdatedAssigned = false;
         document.querySelector(".wallet-btns").style.display = "flex";
         btn.style.display = "block";
         setStatus("Changing wallet: choose a wallet then click Connect & Sign.");
@@ -386,18 +357,10 @@
           return;
         }
 
-        // Retry-safe: if session is gone but roles exist, show them instead of failing
         const errMsg = (result?.error || "").toLowerCase();
         if (errMsg.includes("no active verification")) {
-          const s = await loadStatus();
-          if (s && s.success && hasAnyRoles(s)) {
-            step4.classList.add("active");
-            btn.style.display = "none";
-            document.querySelector(".wallet-btns").style.display = "none";
-            setStatus("This private channel will auto-delete.");
-            return;
-          }
-          setStatus("❌ No active verification session found. Please run /verify again to generate a fresh link.");
+          // We still attempted signing as requested; backend has no session.
+          setStatus("❌ No active verification on the bot. Please run /verify again to generate a fresh link.");
           return;
         }
 
@@ -418,17 +381,23 @@
     }
 
     async function connectInjected() {
-      if (!window.ethereum) throw new Error("No browser wallet detected. Try WalletConnect or WaaP, or open in MetaMask/Rabby browser.");
+      if (!window.ethereum) {
+        throw new Error("No browser wallet detected. Try WalletConnect or WaaP, or open in MetaMask/Rabby browser.");
+      }
       const provider = new ethers.BrowserProvider(window.ethereum);
       await provider.send("eth_requestAccounts", []);
       return provider.getSigner();
     }
 
     async function connectWithAppKit() {
-      if (!window.__reown?.createAppKit) throw new Error("Reown AppKit not loaded. Did /vendor/wallets.bundle.js build and deploy?");
+      if (!window.__reown?.createAppKit) {
+        throw new Error("Reown AppKit not loaded. Did /vendor/wallets.bundle.js build and deploy?");
+      }
+
       if (!appkit) {
         const { createAppKit, EthersAdapter, mainnet, base } = window.__reown;
         const ethersAdapter = new EthersAdapter();
+
         appkit = createAppKit({
           adapters: [ethersAdapter],
           networks: [mainnet, base],
@@ -457,20 +426,27 @@
       });
 
       appkit.close();
+
       const provider = new ethers.BrowserProvider(eip155Provider);
       await provider.send("eth_requestAccounts", []);
       return provider.getSigner();
     }
 
     async function connectWaaP() {
-      if (!window.__initWaaP) throw new Error("WaaP SDK not loaded. Did /vendor/wallets.bundle.js build and deploy?");
+      if (!window.__initWaaP) {
+        throw new Error("WaaP SDK not loaded. Did /vendor/wallets.bundle.js build and deploy?");
+      }
+
       window.__initWaaP({
         config: { authenticationMethods: ["wallet"], styles: { darkMode: false } },
         walletConnectProjectId: WALLETCONNECT_PROJECT_ID,
         project: { name: "role verification" }
       });
 
-      if (!window.waap?.login) throw new Error("WaaP did not initialize (window.waap missing).");
+      if (!window.waap?.login) {
+        throw new Error("WaaP did not initialize (window.waap missing).");
+      }
+
       const loginType = await window.waap.login();
       if (!loginType) throw new Error("WaaP login cancelled.");
 
@@ -489,62 +465,20 @@
       setStatus("Connecting...");
 
       try {
-        // IMPORTANT: fetch latest session info BEFORE wallet connect/sign
+        // Load status if available, but NEVER block signing if session is missing.
         await loadStatus();
-
-        if (lastStatus && lastStatus.success && !lastStatus.activeVerification && !hasAnyRoles(lastStatus)) {
-          btn.classList.remove("loading");
-          setStatus("❌ No active verification session found. Please run /verify again to generate a fresh link.");
-          return;
-        }
 
         if (selected === "injected") signer = await connectInjected();
         else if (selected === "walletconnect") signer = await connectWithAppKit();
         else if (selected === "waap") signer = await connectWaaP();
         else throw new Error("Unknown wallet selection.");
 
-        // Always show the wallet the user just connected
+        // Always show connected wallet
         const addr = await signer.getAddress();
-        const addrLower = String(addr).toLowerCase();
         showConnectedWalletNow(addr);
 
-        const sameWallet = !!(addrLower && sessionWallet && addrLower === sessionWallet);
-
-        // Same wallet + not changing wallet => auto-update roles without signature
-        if (sameWallet && !walletChangeRequested) {
-          setStatus("Same wallet detected. Updating roles (no signature needed)...");
-          updateStep(3);
-
-          const resp2 = await fetch("https://human-tech-bot.onrender.com/api/confirm-wallet", {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "Accept": "application/json" },
-            body: JSON.stringify({ userId: userId, wallet: addr })
-          });
-
-          const data2 = await resp2.json().catch(() => ({}));
-          if (!data2 || !data2.success) {
-            btn.classList.remove("loading");
-            setStatus(
-              "❌ Could not update roles automatically: " + (data2?.error || "Unknown error") +
-              "\nIf you want to change the linked wallet, click “Change wallet” and sign again."
-            );
-            return;
-          }
-
-          uiUpdatedAssigned = true;
-          walletChangeRequested = false;
-
-          const added = Array.isArray(data2.addedRoles) ? data2.addedRoles : [];
-          if (added.length > 0) setStatus("✅ Roles updated. Added: " + added.join(", "));
-          else setStatus("✅ Roles up to date. No new roles were added.");
-
-          updateStep(4);
-          btn.classList.remove("loading");
-          btn.style.display = "none";
-          document.querySelector(".wallet-btns").style.display = "none";
-          return;
-        }
-
+        // If same wallet is known, you can optionally call confirm-wallet here;
+        // but if sessionWallet is missing, we still proceed to sign.
         setStatus("Wallet connected. Awaiting signature approval...");
         await signChallenge();
       } catch (err) {
