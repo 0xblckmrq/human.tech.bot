@@ -352,6 +352,12 @@
       let selected = "injected";
       let appkit = null; // Reown AppKit instance
 
+      // Wallet/session UI state
+      let sessionWallet = null;           // wallet expected for current /verify session (from /api/status)
+      let walletChangeRequested = false;  // user clicked "Change wallet"
+      let uiUpdatedAssigned = false;      // show "ASSIGNED (UPDATED)" after reconnect/refresh
+      let hasRolesInLastStatus = false;   // whether /api/status returned any role info to display
+
       function setStatus(t) { status.innerText = t; }
 
       function updateStep(stepNum) {
@@ -397,26 +403,47 @@
           if (result && result.success) {
             // If backend knows wallet, show it
             const wallet = result?.inputs?.wallet || result?.wallet || null;
+            sessionWallet = wallet ? String(wallet).toLowerCase() : null;
             if (wallet) showLinkedWallet(wallet);
 
-            // If there are any assigned roles, render cards immediately
+            // Always render role status if present (assigned/not assigned), even during an active /verify session
             const hasRoles =
               (Array.isArray(result?.assignedRoles) && result.assignedRoles.length > 0) ||
               (Array.isArray(result?.roles) && result.roles.length > 0) ||
               (typeof result?.roles === "string" && result.roles.trim().length > 0);
 
+            hasRolesInLastStatus = !!hasRoles;
+
             if (hasRoles) {
-              renderRolePanel(result);
-            const wallet = result?.inputs?.wallet || result?.wallet;
-            if (wallet) showLinkedWallet(wallet);
-            // Once verified, keep UI minimal; hide connect/sign unless changing wallet
-            btn.style.display = "none";
-            document.querySelector(".wallet-btns").style.display = "none";
-              updateStep(4);
-              setStatus("This private channel will auto-delete.");
-              // Hide connect/sign until user explicitly changes wallet
+              renderRolePanel(result, { updatedAssigned: uiUpdatedAssigned });
+            }
+
+            // Active /verify session: allow signing again / updating wallet.
+            // If the user just reconnected the SAME wallet, we intentionally keep the UI minimal.
+            if (result?.activeVerification) {
+              if (uiUpdatedAssigned && hasRoles) {
+                updateStep(4);
+                btn.style.display = "none";
+                document.querySelector(".wallet-btns").style.display = "none";
+                setStatus("This private channel will auto-delete.");
+                return;
+              }
+
+              updateStep(1);
+              btn.style.display = "block";
+              document.querySelector(".wallet-btns").style.display = "flex";
+              setStatus("Ready. Choose a wallet then click Connect & Sign.");
+              return;
+            }
+
+            // If there are any assigned roles, keep UI minimal; hide connect/sign unless changing wallet
+            if (hasRoles) {
+              const w2 = result?.inputs?.wallet || result?.wallet;
+              if (w2) showLinkedWallet(w2);
               btn.style.display = "none";
               document.querySelector(".wallet-btns").style.display = "none";
+              updateStep(4);
+              setStatus("This private channel will auto-delete.");
             }
           }
         } catch (e) {
@@ -427,6 +454,8 @@
 
       if (changeWalletBtn) {
         changeWalletBtn.addEventListener("click", () => {
+          walletChangeRequested = true;
+          uiUpdatedAssigned = false;
           // Allow re-linking wallet by signing again
           document.querySelector(".wallet-btns").style.display = "flex";
           btn.style.display = "block";
@@ -492,7 +521,8 @@
         return [];
       }
 
-      function renderRolePanel(result) {
+      function renderRolePanel(result, opts = {}) {
+        const updatedAssigned = !!opts.updatedAssigned;
         const panel = document.getElementById("rolePanel");
         const list = document.getElementById("roleList");
         if (!panel || !list) return;
@@ -515,7 +545,9 @@
           const isAssigned = effectiveAssigned.has(role.key) || effectiveAssigned.has(normRoleKey(role.display));
           const isQualified = effectiveQualified.has(role.key) || effectiveQualified.has(normRoleKey(role.display));
 
-          const badgeText = isAssigned ? "ASSIGNED" : "NOT ASSIGNED";
+          const badgeText = isAssigned
+            ? (updatedAssigned ? "ASSIGNED (UPDATED)" : "ASSIGNED")
+            : "NOT ASSIGNED";
           const badgeClass = isAssigned ? "assigned" : "not-assigned";
 
           // Reason priority:
@@ -744,6 +776,26 @@
           else if (selected === "walletconnect") signer = await connectWithAppKit();
           else if (selected === "waap") signer = await connectWaaP();
           else throw new Error("Unknown wallet selection.");
+
+          // If the user is reconnecting the same wallet already linked for this /verify session,
+          // no re-verification is needed. Refresh role status and mark UI as updated.
+          let addr = null;
+          try { addr = await signer.getAddress(); } catch (_) {}
+          const addrLower = addr ? String(addr).toLowerCase() : null;
+          const sameWallet = !!(addrLower && sessionWallet && addrLower === sessionWallet);
+
+          if (sameWallet && hasRolesInLastStatus) {
+            uiUpdatedAssigned = true;
+            walletChangeRequested = false;
+            btn.classList.remove("loading");
+            updateStep(4);
+            setStatus("Wallet reconnected. No re-verification needed — status refreshed.");
+            await loadStatus();
+            // Keep UI minimal after refresh
+            btn.style.display = "none";
+            document.querySelector(".wallet-btns").style.display = "none";
+            return;
+          }
 
           setStatus("Wallet connected. Awaiting signature approval...");
           await signChallenge();
