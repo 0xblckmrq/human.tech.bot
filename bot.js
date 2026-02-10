@@ -439,15 +439,6 @@ client.on("interactionCreate", async interaction => {
     }
     cooldowns.set(userId, now);
 
-    const list = await fetchWhitelist();
-    const entry = list.find(w =>
-      w.walletAddress?.toLowerCase() === wallet &&
-      w.covenantStatus?.toUpperCase() === "SIGNED" &&
-      w.humanityStatus?.toUpperCase() === "VERIFIED"
-    );
-
-    if (!entry) return interaction.editReply({ content: "❌ Wallet not eligible: must be SIGNED + VERIFIED." });
-
     try {
       const channel = await guild.channels.create({
         name: `verify-${member.user.username}`,
