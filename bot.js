@@ -440,52 +440,35 @@ client.on("interactionCreate", async interaction => {
     cooldowns.set(userId, now);
 
     // Fast-path: if this user has already verified this SAME wallet before, refresh roles immediately.
-    // We still use a private channel so results don't clutter the main chat.
+    // Return results ephemerally (no private channel) to avoid clutter.
     const storedWallet = getVerifiedWallet(userId);
     if (storedWallet && storedWallet.toLowerCase() === wallet) {
       try {
         const member2 = await guild.members.fetch(userId);
         const roleReport = await applyRolesForMember(guild, member2, wallet);
 
-        const channel = await guild.channels.create({
-          name: `verify-${member.user.username}`,
-          type: ChannelType.GuildText,
-          permissionOverwrites: [
-            { id: guild.roles.everyone, deny: [PermissionsBitField.Flags.ViewChannel] },
-            { id: member.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] },
-            { id: client.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] }
-          ]
+        const roleLines = Object.keys(ROLE_RULES).map(rn => {
+          if (roleReport.assignedRoles.includes(rn)) return `✅ ${rn} — unlocks ${ROLE_RULES[rn].unlocks.join(" + ")}`;
+          const reason = roleReport.notAssigned[rn] || "Not assigned";
+          return `❌ ${rn} — ${reason} — unlocks ${ROLE_RULES[rn].unlocks.join(" + ")}`;
+        }).join("\n");
+
+        return interaction.editReply({
+          content:
+            `✅ **Roles refreshed (no re-sign needed)**\n\n` +
+            `🔗 Wallet: **${wallet}**\n` +
+            `🧮 Passport score: **${Number(roleReport?.inputs?.passportScore ?? 0)}**\n` +
+            `🎨 NFT holder: **${(roleReport?.inputs?.nftHolder) ? "Yes" : "No"}**\n` +
+            `🏷 Roles granted: **${roleReport.assignedRoles.join(", ") || "None"}**\n\n` +
+            `**Role status:**\n${roleLines}`
         });
-
-        createdChannels.set(userId, channel.id);
-
-        // Auto-delete shortly after posting refresh results
-        await channel.send(
-          `✅ **Roles refreshed (no re-sign needed)**\n\n` +
-          `🔗 Wallet: **${wallet}**\n` +
-          `🧮 Passport score: **${Number(roleReport?.inputs?.passportScore ?? 0)}**\n` +
-          `🎨 NFT holder: **${(roleReport?.inputs?.nftHolder) ? "Yes" : "No"}**\n` +
-          `🏷 Roles granted: **${roleReport.assignedRoles.join(", ") || "None"}**\n\n` +
-          `**Role status:**\n` +
-          Object.keys(ROLE_RULES).map(rn => {
-            if (roleReport.assignedRoles.includes(rn)) return `✅ ${rn} — unlocks ${ROLE_RULES[rn].unlocks.join(" + ")}`;
-            const reason = roleReport.notAssigned[rn] || "Not assigned";
-            return `❌ ${rn} — ${reason} — unlocks ${ROLE_RULES[rn].unlocks.join(" + ")}`;
-          }).join("\n") +
-          `\n\nChannel will close shortly…`
-        );
-
-        setTimeout(() => channel.delete().catch(() => {}), VERIFIED_CLOSE_MS);
-
-        return interaction.editReply({ content: `✅ Roles refreshed in private channel: ${channel}` });
       } catch (e) {
         console.error("Same-wallet refresh failed:", e.message);
         return interaction.editReply({ content: "❌ Failed to refresh roles. Please try again shortly." });
       }
     }
 
-    const list = await fetchWhitelist();
-    const entry = list.find(w =>
+    const list = await fetchWhitelist();    const entry = list.find(w =>
       w.walletAddress?.toLowerCase() === wallet &&
       w.covenantStatus?.toUpperCase() === "SIGNED" &&
       w.humanityStatus?.toUpperCase() === "VERIFIED"
