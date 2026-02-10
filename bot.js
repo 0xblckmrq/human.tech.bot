@@ -440,7 +440,7 @@ client.on("interactionCreate", async interaction => {
     cooldowns.set(userId, now);
 
     // Fast-path: if this user has already verified this SAME wallet before, refresh roles immediately.
-    // Use a private channel for the refresh results so it doesn't clutter the main chat.
+    // We still use a private channel so results don't clutter the main chat.
     const storedWallet = getVerifiedWallet(userId);
     if (storedWallet && storedWallet.toLowerCase() === wallet) {
       try {
@@ -457,35 +457,27 @@ client.on("interactionCreate", async interaction => {
           ]
         });
 
+        createdChannels.set(userId, channel.id);
+
+        // Auto-delete shortly after posting refresh results
         await channel.send(
-          `✅ **Roles refreshed (no re-sign needed)**
-
-` +
-          `🔗 Wallet: **${wallet}**
-` +
-          `🧮 Passport score: **${Number(roleReport?.inputs?.passportScore ?? 0)}**
-` +
-          `🎨 NFT holder: **${(roleReport?.inputs?.nftHolder) ? "Yes" : "No"}**
-` +
-          `🏷 Roles granted: **${roleReport.assignedRoles.join(", ") || "None"}**
-
-` +
-          `**Role status:**
-` +
+          `✅ **Roles refreshed (no re-sign needed)**\n\n` +
+          `🔗 Wallet: **${wallet}**\n` +
+          `🧮 Passport score: **${Number(roleReport?.inputs?.passportScore ?? 0)}**\n` +
+          `🎨 NFT holder: **${(roleReport?.inputs?.nftHolder) ? "Yes" : "No"}**\n` +
+          `🏷 Roles granted: **${roleReport.assignedRoles.join(", ") || "None"}**\n\n` +
+          `**Role status:**\n` +
           Object.keys(ROLE_RULES).map(rn => {
             if (roleReport.assignedRoles.includes(rn)) return `✅ ${rn} — unlocks ${ROLE_RULES[rn].unlocks.join(" + ")}`;
             const reason = roleReport.notAssigned[rn] || "Not assigned";
             return `❌ ${rn} — ${reason} — unlocks ${ROLE_RULES[rn].unlocks.join(" + ")}`;
-          }).join("
-") +
-          `
-
-Channel will close shortly…`
+          }).join("\n") +
+          `\n\nChannel will close shortly…`
         );
 
         setTimeout(() => channel.delete().catch(() => {}), VERIFIED_CLOSE_MS);
 
-        return interaction.editReply({ content: `✅ Role refresh channel created: ${channel}` });
+        return interaction.editReply({ content: `✅ Roles refreshed in private channel: ${channel}` });
       } catch (e) {
         console.error("Same-wallet refresh failed:", e.message);
         return interaction.editReply({ content: "❌ Failed to refresh roles. Please try again shortly." });
@@ -711,12 +703,8 @@ app.post("/api/confirm-wallet", async (req, res) => {
     const guild = client.guilds.cache.get(GUILD_ID);
     const member = await guild.members.fetch(userId);
 
-    // Snapshot current roles (for 'addedRoles' reporting)
     const before = getAssignedRoleNames(member);
-
-    // Reconcile roles for the stored wallet
     const roleReport = await applyRolesForMember(guild, member, wallet);
-
     const addedRoles = roleReport.assignedRoles.filter(r => !before.has(r));
 
     return res.json({
