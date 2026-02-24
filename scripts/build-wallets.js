@@ -15,9 +15,6 @@ const path = require("path");
     platform: "browser",
     target: ["es2020"],
     outfile: path.join(outdir, "wallets.bundle.js"),
-
-    // @human.tech/waap-sdk imports react as a peer dependency; exclude it from the bundle.
-    external: ["react", "react-dom"],
   });
 
   console.log("✅ Built public/vendor/wallets.bundle.js");
