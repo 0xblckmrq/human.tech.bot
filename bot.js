@@ -780,6 +780,7 @@ app.post("/api/start-verification", async (req, res) => {
 
   try {
     // Preserve any existing channelId (if started via /verify) and clear any in-flight session.
+    const prev = challenges.get(userId);
     challenges.delete(userId);
 
     // Eligibility gate (same as /verify flow)
