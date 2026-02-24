@@ -426,7 +426,8 @@
             btn.style.display = "none";
             document.querySelector(".wallet-btns").style.display = "none";
               updateStep(4);
-              setStatus("This private channel will auto-delete.");
+              const rlMsg = extractRateLimitMessage(result?.notAssigned || result?.reasons || result?.roleReasons);
+            setStatus(rlMsg ? ("⚠️ " + rlMsg) : "This private channel will auto-delete.");
               // Hide connect/sign until user explicitly changes wallet
               btn.style.display = "none";
               document.querySelector(".wallet-btns").style.display = "none";
@@ -523,7 +524,22 @@
         return [];
       }
 
-      function renderRolePanel(result) {
+      
+      function extractRateLimitMessage(notAssigned) {
+        if (!notAssigned || typeof notAssigned !== "object") return null;
+        for (const v of Object.values(notAssigned)) {
+          if (v && typeof v === "object" && v.retryAfterAt) {
+            const retryDate = new Date(v.retryAfterAt).toLocaleString();
+            const msg = v.message || "Temporarily unavailable.";
+            return `${msg} Try again after 24 hours (after ${retryDate}).`;
+          }
+          if (typeof v === "string" && /rate-?limit|capacity limit|too many requests/i.test(v)) {
+            return `${v} Try again after 24 hours.`;
+          }
+        }
+        return null;
+      }
+function renderRolePanel(result) {
         const panel = document.getElementById("rolePanel");
         const list = document.getElementById("roleList");
         if (!panel || !list) return;
@@ -553,16 +569,31 @@
           // - explicit reason from backend
           // - if qualified but not assigned, show that it’s pending / failed assignment
           // - otherwise show “not eligible”
-          const backendReason =
+          const rawReason =
             reasons?.[role.key] ||
             reasons?.[role.display] ||
             reasons?.[normRoleKey(role.display)] ||
             reasons?.[role.key.toUpperCase()] ||
             "";
 
+          let backendReason = rawReason;
+          let retryAfterAt = null;
+
+          if (typeof rawReason === "object" && rawReason !== null) {
+            backendReason = rawReason.message || "Temporarily unavailable.";
+            retryAfterAt = rawReason.retryAfterAt || null;
+          }
+
           let reasonText = "";
           if (!isAssigned) {
-            if (backendReason) reasonText = backendReason;
+            if (backendReason) {
+              if (retryAfterAt) {
+                const retryDate = new Date(retryAfterAt).toLocaleString();
+                reasonText = `${backendReason} Try again after 24 hours (after ${retryDate}).`;
+              } else {
+                reasonText = backendReason;
+              }
+            }
             else if (isQualified) reasonText = "You qualified, but the bot did not assign this role (check bot permissions / role hierarchy).";
             else {
               if (role.key === "chosen_one") {
@@ -582,7 +613,14 @@
             }
           } else {
             // If assigned, optionally show why/how
-            if (backendReason) reasonText = backendReason;
+            if (backendReason) {
+              if (retryAfterAt) {
+                const retryDate = new Date(retryAfterAt).toLocaleString();
+                reasonText = `${backendReason} Try again after 24 hours (after ${retryDate}).`;
+              } else {
+                reasonText = backendReason;
+              }
+            }
             else if (isQualified) reasonText = "Qualified and successfully assigned.";
             else reasonText = "Assigned by the bot.";
           }
@@ -636,7 +674,8 @@
             btn.style.display = "none";
             document.querySelector(".wallet-btns").style.display = "none";
             // Keep UI minimal — role cards are the source of truth
-            setStatus("This private channel will auto-delete.");
+            const rlMsg2 = extractRateLimitMessage(result?.notAssigned || result?.reasons || result?.roleReasons);
+            setStatus(rlMsg2 ? ("⚠️ " + rlMsg2) : "This private channel will auto-delete.");
             return;
           }
 
