@@ -8,9 +8,7 @@
     "start": "node bot.js",
     "build:wallets": "node scripts/build-wallets.js",
     "build": "npm run build:wallets"
-  },
-  "engines": {
-    "node": "22.x"
+  
   },
   "dependencies": {
     "discord.js": "^14.15.0",
