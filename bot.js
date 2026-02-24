@@ -32,7 +32,8 @@ const PASSPORT_API_KEY = process.env.PASSPORT_API_KEY;
 const ALCHEMY_BASE_KEY = process.env.ALCHEMY_BASE_KEY; // Alchemy Base (NFT API)
 const ALCHEMY_ETH_KEY = process.env.ALCHEMY_ETH_KEY;
 const ALCHEMY_WEBHOOK_SIGNING_KEY = process.env.ALCHEMY_WEBHOOK_SIGNING_KEY; // Optional: verify Alchemy webhook signatures
-const ROLE_REFRESH_MINUTES = Number(process.env.ROLE_REFRESH_MINUTES || 60);
+// Default polling to 12h when webhooks are configured; override with ROLE_REFRESH_MINUTES.
+const ROLE_REFRESH_MINUTES = Number(process.env.ROLE_REFRESH_MINUTES || 720);
  // Optional: Alchemy Ethereum RPC key to avoid throttled default providers
 
 if (!TOKEN || !CLIENT_ID || !GUILD_ID || !API_KEY || !EXTERNAL_URL || !PASSPORT_API_KEY || !ALCHEMY_BASE_KEY) {
@@ -129,18 +130,52 @@ function getVerifiedWallet(userId) {
 // ===== CACHES =====
 const scoreCache = new Map();
 const nftCache = new Map();
-const CACHE_TTL = 5 * 60 * 1000;
+// Match typical refresh cadence to reduce provider/API calls.
+const CACHE_TTL = 60 * 60 * 1000; // 1 hour
 
 function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
+
+function isRateLimitError(e) {
+  const msg = String(e?.message || "");
+  return msg.includes("429") || msg.toLowerCase().includes("capacity limit") || msg.toLowerCase().includes("too many requests");
+}
 
 // ===== RETRY HELPER =====
 async function retry(fn, retries = 3, delay = 1000) {
   let lastError;
   for (let i = 0; i < retries; i++) {
     try { return await fn(); }
-    catch (e) { lastError = e; await new Promise(r => setTimeout(r, delay)); }
+    catch (e) {
+      lastError = e;
+      // Do not retry hard rate limits / exhausted quota.
+      if (isRateLimitError(e)) throw e;
+      await new Promise(r => setTimeout(r, delay));
+    }
   }
   throw lastError;
+}
+
+// ===== ETH RPC PROVIDER (FALLBACK) =====
+// Supports env override via ETH_RPC_URLS="url1,url2" (optional).
+function getEthProvider() {
+  const urlsFromEnv = String(process.env.ETH_RPC_URLS || "")
+    .split(",")
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  const urls = urlsFromEnv.length
+    ? urlsFromEnv
+    : [
+        ...(ALCHEMY_ETH_KEY ? [`https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_ETH_KEY}`] : []),
+        // Public fallbacks
+        "https://cloudflare-eth.com",
+        "https://rpc.ankr.com/eth"
+      ];
+
+  const providers = urls.map(u => new ethers.JsonRpcProvider(u));
+  // If only one is provided, just use it.
+  if (providers.length === 1) return providers[0];
+  return new ethers.FallbackProvider(providers);
 }
 
 // ===== REGISTER /verify SLASH COMMAND =====
@@ -192,9 +227,7 @@ const CONTRIBUTOR_NFT_CONTRACT = "0x25e580d1113d040af6bc2edd626cf50348973c70".to
 
 async function checkContributorNFTOwnershipEth(wallet) {
   try {
-    const ethProvider = ALCHEMY_ETH_KEY
-      ? new ethers.AlchemyProvider("homestead", ALCHEMY_ETH_KEY)
-      : ethers.getDefaultProvider("homestead");
+    const ethProvider = getEthProvider();
     const contributorContract = new ethers.Contract(
       CONTRIBUTOR_NFT_CONTRACT,
       ERC721_ABI,
@@ -209,7 +242,8 @@ async function checkContributorNFTOwnershipEth(wallet) {
     return hasContributorNft;
   } catch (e) {
     console.error("[DEBUG] Contributor NFT check failed:", e.message);
-    return false;
+    // Unknown (do not revoke on provider failure)
+    return null;
   }
 }
 
@@ -233,12 +267,14 @@ async function checkBaseNFTOwnershipAlchemy(wallet) {
       data = JSON.parse(text);
     } catch (_) {
       console.error("[DEBUG] Alchemy Base returned non-JSON:", text.slice(0, 200));
-      return false;
+      return null;
     }
 
     if (!res.ok) {
       console.error("[DEBUG] Alchemy Base error:", data);
-      return false;
+      // Treat rate limits / quota exhaustion as unknown.
+      if (res.status === 429 || String(data?.error?.message || "").toLowerCase().includes("capacity")) return null;
+      return null;
     }
 
     const owned = Array.isArray(data?.ownedNfts) ? data.ownedNfts : [];
@@ -248,7 +284,7 @@ async function checkBaseNFTOwnershipAlchemy(wallet) {
     return hasNFT;
   } catch (err) {
     console.error("[DEBUG] Alchemy Base NFT check failed:", err.message);
-    return false;
+    return null;
   }
 }
 
@@ -264,40 +300,48 @@ async function checkNFTOwnershipMulti(wallet) {
   const cached = nftCache.get(wallet);
   if (cached && Date.now() - cached.timestamp < CACHE_TTL) return cached.isHolder;
 
-  let isHolder = false;
+  let anyUnknown = false;
 
-  await retry(async () => {
-    // Base network using Alchemy API
-    try {
-      const baseHasNFT = await checkBaseNFTOwnershipAlchemy(wallet);
-      if (baseHasNFT) isHolder = true;
-    } catch (e) { console.error("Base NFT check failed:", e.message); }
-
-    // Ethereum mainnet (ERC721) with ethers
-    try {
-      const ethProvider = ALCHEMY_ETH_KEY
-        ? new ethers.JsonRpcProvider(`https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_ETH_KEY}`)
-        : ethers.getDefaultProvider("homestead");
-      const ethContract = new ethers.Contract(
-        "0xa3c5bb6a34d758fc5d5c656b06b51b4078ba68a8",
-        ERC721_ABI,
-        ethProvider
-      );
-      const balance = await ethContract.balanceOf(wallet);
-      console.log(`[DEBUG] Ethereum NFT balance for ${wallet}:`, balance.toString());
-      // ethers v5 returns BigNumber (has .gt). ethers v6 returns bigint.
-      const hasEthNft =
-        typeof balance === "bigint"
-          ? balance > 0n
-          : (balance?.gt?.(0) ?? Number(balance) > 0);
-      if (hasEthNft) isHolder = true;
-    } catch (e) { console.error("[DEBUG] Ethereum NFT check failed:", e.message); }
-
+  // Base network using Alchemy API
+  let baseHasNFT = null;
+  try { baseHasNFT = await checkBaseNFTOwnershipAlchemy(wallet); }
+  catch (e) { console.error("Base NFT check failed:", e.message); baseHasNFT = null; }
+  if (baseHasNFT === true) {
+    nftCache.set(wallet, { isHolder: true, timestamp: Date.now() });
     return true;
-  });
+  }
+  if (baseHasNFT === null) anyUnknown = true;
 
-  nftCache.set(wallet, { isHolder, timestamp: Date.now() });
-  return isHolder;
+  // Ethereum mainnet (ERC721) with fallback provider
+  let ethHasNFT = null;
+  try {
+    const ethProvider = getEthProvider();
+    const ethContract = new ethers.Contract(
+      "0xa3c5bb6a34d758fc5d5c656b06b51b4078ba68a8",
+      ERC721_ABI,
+      ethProvider
+    );
+    const balance = await ethContract.balanceOf(wallet);
+    console.log(`[DEBUG] Ethereum NFT balance for ${wallet}:`, balance.toString());
+    // ethers v5 returns BigNumber (has .gt). ethers v6 returns bigint.
+    const hasEthNft =
+      typeof balance === "bigint"
+        ? balance > 0n
+        : (balance?.gt?.(0) ?? Number(balance) > 0);
+    ethHasNFT = hasEthNft;
+  } catch (e) {
+    console.error("[DEBUG] Ethereum NFT check failed:", e.message);
+    ethHasNFT = null;
+  }
+  if (ethHasNFT === true) {
+    nftCache.set(wallet, { isHolder: true, timestamp: Date.now() });
+    return true;
+  }
+  if (ethHasNFT === null) anyUnknown = true;
+
+  const final = anyUnknown ? null : false;
+  nftCache.set(wallet, { isHolder: final, timestamp: Date.now() });
+  return final;
   })();
 
   nftInflight.set(wallet, task);
@@ -327,10 +371,10 @@ function getAssignedRoleNames(member) {
 
 async function computeEligibility(wallet) {
   const out = {
-    passportScore: 0,
-    nftHolder: false,
-    contributorHolder: false,
-    inManifest: false
+    passportScore: null,
+    nftHolder: null,
+    contributorHolder: null,
+    inManifest: null
   };
 
   // Manifest check
@@ -344,19 +388,20 @@ async function computeEligibility(wallet) {
     out.inManifest = !!entry;
   } catch (e) {
     console.error("Manifest whitelist fetch failed:", e.message);
+    out.inManifest = null;
   }
 
   // Passport score
   try { out.passportScore = await fetchPassportScore(wallet); }
-  catch (e) { console.error("Passport lookup failed:", e.message); }
+  catch (e) { console.error("Passport lookup failed:", e.message); out.passportScore = null; }
 
   // NFT ownership (OG covenant contract)
   try { out.nftHolder = await checkNFTOwnershipMulti(wallet); }
-  catch (e) { console.error("NFT ownership check failed:", e.message); }
+  catch (e) { console.error("NFT ownership check failed:", e.message); out.nftHolder = null; }
 
   // Contributor NFT ownership (ETH mainnet)
   try { out.contributorHolder = await checkContributorNFTOwnershipEth(wallet); }
-  catch (e) { console.error("Contributor NFT ownership check failed:", e.message); }
+  catch (e) { console.error("Contributor NFT ownership check failed:", e.message); out.contributorHolder = null; }
 
   return out;
 }
@@ -384,26 +429,67 @@ async function applyRolesForMember(guild, member, wallet) {
   roleReport.inputs.contributorHolder = eligibility.contributorHolder;
   roleReport.inputs.inManifest = eligibility.inManifest;
 
-  // Decide qualifications
+  // Decide desired role states (true/false/null). null => unknown, do not revoke.
+  const desired = {};
+
   // Covenant Verified Signatory: in manifest (SIGNED + VERIFIED)
-  if (eligibility.inManifest) roleReport.qualifiedRoles.push(ROLE_NAMES.covenantVerified);
-  else roleReport.notAssigned[ROLE_NAMES.covenantVerified] = "You are not verified as a signatory (not found in the manifest whitelist).";
+  if (eligibility.inManifest === true) desired[ROLE_NAMES.covenantVerified] = true;
+  else if (eligibility.inManifest === false) {
+    desired[ROLE_NAMES.covenantVerified] = false;
+    roleReport.notAssigned[ROLE_NAMES.covenantVerified] = "You are not verified as a signatory (not found in the manifest whitelist).";
+  } else {
+    desired[ROLE_NAMES.covenantVerified] = null;
+    roleReport.notAssigned[ROLE_NAMES.covenantVerified] = "Temporarily unable to verify manifest status; your existing role will not be removed.";
+  }
 
-  // Covenant Signatory O.G.: holds OG NFTs (Base contract and/or ETH mainnet contract)
-  if (eligibility.nftHolder) roleReport.qualifiedRoles.push(ROLE_NAMES.covenantOg);
-  else roleReport.notAssigned[ROLE_NAMES.covenantOg] = "You do not own the limited edition Human Tech Covenant Signatory.";
+  // Covenant Signatory O.G.: holds OG NFTs (Base and/or ETH)
+  if (eligibility.nftHolder === true) desired[ROLE_NAMES.covenantOg] = true;
+  else if (eligibility.nftHolder === false) {
+    desired[ROLE_NAMES.covenantOg] = false;
+    roleReport.notAssigned[ROLE_NAMES.covenantOg] = "You do not own the limited edition Human Tech Covenant Signatory.";
+  } else {
+    desired[ROLE_NAMES.covenantOg] = null;
+    roleReport.notAssigned[ROLE_NAMES.covenantOg] = "Temporarily unable to verify NFT ownership (provider rate-limited); your existing role will not be removed.";
+  }
 
-  // Covenant Contributor: holds Contributor NFT (ETH mainnet)
-  if (eligibility.contributorHolder) roleReport.qualifiedRoles.push(ROLE_NAMES.covenantContributor);
-  else roleReport.notAssigned[ROLE_NAMES.covenantContributor] = "You do not own the Human Tech Covenant Contributor NFT.";
+  // Covenant Contributor: holds Contributor NFT (ETH)
+  if (eligibility.contributorHolder === true) desired[ROLE_NAMES.covenantContributor] = true;
+  else if (eligibility.contributorHolder === false) {
+    desired[ROLE_NAMES.covenantContributor] = false;
+    roleReport.notAssigned[ROLE_NAMES.covenantContributor] = "You do not own the Human Tech Covenant Contributor NFT.";
+  } else {
+    desired[ROLE_NAMES.covenantContributor] = null;
+    roleReport.notAssigned[ROLE_NAMES.covenantContributor] = "Temporarily unable to verify Contributor NFT (provider rate-limited); your existing role will not be removed.";
+  }
 
   // Chosen One: Passport >= 70
-  if (eligibility.passportScore >= 70) roleReport.qualifiedRoles.push(ROLE_NAMES.chosen);
-  else roleReport.notAssigned[ROLE_NAMES.chosen] = `Passport score ${eligibility.passportScore} < 70`;
+  if (typeof eligibility.passportScore === "number") {
+    if (eligibility.passportScore >= 70) desired[ROLE_NAMES.chosen] = true;
+    else {
+      desired[ROLE_NAMES.chosen] = false;
+      roleReport.notAssigned[ROLE_NAMES.chosen] = `Passport score ${eligibility.passportScore} < 70`;
+    }
+  } else {
+    desired[ROLE_NAMES.chosen] = null;
+    roleReport.notAssigned[ROLE_NAMES.chosen] = "Temporarily unable to fetch Passport score; your existing role will not be removed.";
+  }
 
   // O.G. HUMN: Passport >= 20
-  if (eligibility.passportScore >= 20) roleReport.qualifiedRoles.push(ROLE_NAMES.ogHumn);
-  else roleReport.notAssigned[ROLE_NAMES.ogHumn] = `Passport score ${eligibility.passportScore} < 20`;
+  if (typeof eligibility.passportScore === "number") {
+    if (eligibility.passportScore >= 20) desired[ROLE_NAMES.ogHumn] = true;
+    else {
+      desired[ROLE_NAMES.ogHumn] = false;
+      roleReport.notAssigned[ROLE_NAMES.ogHumn] = `Passport score ${eligibility.passportScore} < 20`;
+    }
+  } else {
+    desired[ROLE_NAMES.ogHumn] = null;
+    roleReport.notAssigned[ROLE_NAMES.ogHumn] = "Temporarily unable to fetch Passport score; your existing role will not be removed.";
+  }
+
+  // qualifiedRoles = those explicitly true
+  for (const [rn, v] of Object.entries(desired)) {
+    if (v === true) roleReport.qualifiedRoles.push(rn);
+  }
 
   // Apply add/remove (only for roles we manage)
   const managed = Object.values(ROLE_NAMES);
@@ -418,14 +504,19 @@ async function applyRolesForMember(guild, member, wallet) {
 
     const hasRole = member.roles.cache.has(roleObj.id);
     const shouldHave = qualifiedSet.has(roleName);
+    const desiredState = Object.prototype.hasOwnProperty.call(desired, roleName)
+      ? desired[roleName]
+      : (shouldHave ? true : false);
 
     try {
-      if (shouldHave && !hasRole) {
+      if (desiredState === true && !hasRole) {
         await member.roles.add(roleObj);
         await sleep(500);
-      } else if (!shouldHave && hasRole) {
+      } else if (desiredState === false && hasRole) {
         await member.roles.remove(roleObj);
         await sleep(500);
+      } else {
+        // desiredState === null => unknown; do nothing (no revoke)
       }
     } catch (e) {
       // Don't overwrite a more specific reason
@@ -528,8 +619,8 @@ try {
           content:
             `✅ **Roles refreshed (no re-sign needed)**\n\n` +
             `🔗 Wallet: **${wallet}**\n` +
-            `🧮 Passport score: **${Number(roleReport?.inputs?.passportScore ?? 0)}**\n` +
-            `🎨 NFT holder: **${(roleReport?.inputs?.nftHolder) ? "Yes" : "No"}**\n` +
+            `🧮 Passport score: **${(typeof roleReport?.inputs?.passportScore === "number") ? roleReport.inputs.passportScore : "Unknown"}**\n` +
+            `🎨 NFT holder: **${(roleReport?.inputs?.nftHolder === true) ? "Yes" : (roleReport?.inputs?.nftHolder === false ? "No" : "Unknown")}**\n` +
             `🏷 Roles granted: **${roleReport.assignedRoles.join(", ") || "None"}**\n\n` +
             `**Role status:**\n${roleLines}`
         });
@@ -626,8 +717,8 @@ app.post("/api/signature", async (req, res) => {
     if (channel) {
       await channel.send(
         `✅ **Wallet verified**\n\n` +
-        `🧮 Passport score: **${Number(roleReport?.inputs?.passportScore ?? 0)}**\n` +
-        `🎨 NFT holder: **${(roleReport?.inputs?.nftHolder) ? "Yes" : "No"}**\n` +
+        `🧮 Passport score: **${(typeof roleReport?.inputs?.passportScore === "number") ? roleReport.inputs.passportScore : "Unknown"}**\n` +
+        `🎨 NFT holder: **${(roleReport?.inputs?.nftHolder === true) ? "Yes" : (roleReport?.inputs?.nftHolder === false ? "No" : "Unknown")}**\n` +
         `🏷 Roles granted: **${roleReport.assignedRoles.join(", ") || "None"}**\n\n` +
         `**Role status:**\n` +
         Object.keys(ROLE_RULES).map(rn => {
