@@ -328,8 +328,14 @@
     document.addEventListener("DOMContentLoaded", () => {
       const WALLETCONNECT_PROJECT_ID = "458187c5895e1cb056679eedabc8f362";
 
+      // Use same-origin API by default; keeps this portable across environments.
+      // If you host signer.html on a different domain than the bot, set API_BASE accordingly.
+      const API_BASE = window.location.origin;
+
       const params = new URLSearchParams(window.location.search);
-      const challenge = params.get("challenge") || "";
+      // Backward compatible: if a challenge is passed via URL, we can still use it.
+      // Preferred flow: obtain a fresh challenge from /api/start-verification after wallet connect.
+      const challengeFromUrl = params.get("challenge") || "";
       const userId = params.get("userId");
 
       const msgInput = document.getElementById("msg");
@@ -346,11 +352,18 @@
       const btnWC = document.getElementById("btnWC");
       const btnWaaP = document.getElementById("btnWaaP");
 
-      msgInput.value = challenge || "❌ No challenge received";
+      msgInput.value = challengeFromUrl || "Connect your wallet to generate a challenge.";
 
       let signer;
       let selected = "injected";
       let appkit = null; // Reown AppKit instance
+
+      let activeChallenge = challengeFromUrl || "";
+
+      function setChallenge(nextChallenge) {
+        activeChallenge = nextChallenge || "";
+        msgInput.value = activeChallenge || "Connect your wallet to generate a challenge.";
+      }
 
       function setStatus(t) { status.innerText = t; }
 
@@ -388,7 +401,7 @@
         try {
           if (!userId) return;
           // same host as signature endpoint
-          const resp = await fetch("https://human-tech-bot.onrender.com/api/status?userId=" + encodeURIComponent(userId.toString()), {
+          const resp = await fetch(API_BASE + "/api/status?userId=" + encodeURIComponent(userId.toString()), {
             method: "GET",
             headers: { "Accept": "application/json" }
           });
@@ -427,10 +440,28 @@
 
       if (changeWalletBtn) {
         changeWalletBtn.addEventListener("click", () => {
-          // Allow re-linking wallet by signing again
-          document.querySelector(".wallet-btns").style.display = "flex";
-          btn.style.display = "block";
-          setStatus("Changing wallet: choose a wallet then click Connect & Sign.");
+          // Allow re-linking wallet by signing again.
+          // Also cancels any in-flight verification to prevent the UI from getting "stuck".
+          (async () => {
+            try {
+              if (userId) {
+                await fetch(API_BASE + "/api/cancel-verification", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ userId: userId.toString() })
+                });
+              }
+            } catch (_) {
+              // Best-effort.
+            }
+
+            setChallenge("");
+            document.querySelector(".wallet-btns").style.display = "flex";
+            btn.style.display = "block";
+            btn.classList.remove("loading");
+            updateStep(1);
+            setStatus("Changing wallet: select a wallet, then click Connect & Sign.");
+          })();
           // Keep cards visible until a new verification succeeds (less jarring).
           // If you prefer clearing them immediately, uncomment next 2 lines:
           // const rp = document.getElementById("rolePanel"); if (rp) rp.style.display = "none";
@@ -590,7 +621,7 @@
         try {
           sigOutput.innerText = sig;
           setStatus("Submitting signature to bot...");
-          const resp = await fetch("https://human-tech-bot.onrender.com/api/signature", {
+          const resp = await fetch(API_BASE + "/api/signature", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ userId: userId.toString(), signature: sig })
@@ -641,9 +672,32 @@
         }
       }
 
-      async function signChallenge() {
+      async function startVerificationForWallet(wallet) {
+        if (!userId) throw new Error("Missing userId in URL.");
+
+        setStatus("Requesting a fresh challenge...");
+        const resp = await fetch(API_BASE + "/api/start-verification", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userId: userId.toString(), wallet })
+        });
+
+        const result = await resp.json();
+        if (!result?.success) {
+          throw new Error(result?.error || "Failed to start verification");
+        }
+
+        if (!result?.challenge) {
+          throw new Error("No challenge returned by server");
+        }
+
+        setChallenge(result.challenge);
+        return result.challenge;
+      }
+
+      async function signChallenge(challengeToSign) {
         step2.classList.add("active");
-        const sig = await signer.signMessage(challenge);
+        const sig = await signer.signMessage(challengeToSign);
         await submitSignature(sig);
       }
 
@@ -745,8 +799,14 @@
           else if (selected === "waap") signer = await connectWaaP();
           else throw new Error("Unknown wallet selection.");
 
+          const wallet = await signer.getAddress();
+          if (wallet) showLinkedWallet(wallet);
+
+          updateStep(2);
+          const freshChallenge = await startVerificationForWallet(wallet);
+
           setStatus("Wallet connected. Awaiting signature approval...");
-          await signChallenge();
+          await signChallenge(freshChallenge);
         } catch (err) {
           console.error(err);
           btn.classList.remove("loading");
