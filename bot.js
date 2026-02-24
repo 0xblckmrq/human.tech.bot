@@ -255,7 +255,7 @@ async function checkNFTOwnershipMulti(wallet) {
     // Ethereum mainnet (ERC721) with ethers
     try {
       const ethProvider = ALCHEMY_ETH_KEY
-        ? new ethers.AlchemyProvider("homestead", ALCHEMY_ETH_KEY)
+        ? new ethers.JsonRpcProvider(`https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_ETH_KEY}`)
         : ethers.getDefaultProvider("homestead");
       const ethContract = new ethers.Contract(
         "0xa3c5bb6a34d758fc5d5c656b06b51b4078ba68a8",
