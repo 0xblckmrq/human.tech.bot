@@ -31,6 +31,7 @@ const EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL;
 const PASSPORT_API_KEY = process.env.PASSPORT_API_KEY;
 const ALCHEMY_BASE_KEY = process.env.ALCHEMY_BASE_KEY; // Alchemy Base (NFT API)
 const ALCHEMY_ETH_KEY = process.env.ALCHEMY_ETH_KEY;
+const ETH_MAINNET = { name: "homestead", chainId: 1 }; // Pin network to avoid detect-network spam
 const ALCHEMY_WEBHOOK_SIGNING_KEY = process.env.ALCHEMY_WEBHOOK_SIGNING_KEY; // Optional: verify Alchemy webhook signatures
 // Default polling to 12h when webhooks are configured; override with ROLE_REFRESH_MINUTES.
 const ROLE_REFRESH_MINUTES = Number(process.env.ROLE_REFRESH_MINUTES || 720);
@@ -173,7 +174,7 @@ function getEthProvider() {
   const urls = urlsFromEnv.length ? urlsFromEnv : defaultUrls;
 
   // Pin chainId=1 to avoid noisy network detection retries.
-  const providers = urls.map(u => new ethers.JsonRpcProvider(u, 1));
+  const providers = urls.map(u => new ethers.JsonRpcProvider(u, ETH_MAINNET));
 
   if (providers.length === 1) return providers[0];
 
