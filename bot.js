@@ -163,20 +163,26 @@ function getEthProvider() {
     .map(s => s.trim())
     .filter(Boolean);
 
-  const urls = urlsFromEnv.length
-    ? urlsFromEnv
-    : [
-        ...(ALCHEMY_ETH_KEY ? [`https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_ETH_KEY}`] : []),
-        // Public fallbacks
-        "https://cloudflare-eth.com",
-        "https://rpc.ankr.com/eth"
-      ];
+  // Prefer free/public RPCs first; keep Alchemy as last fallback (if key is set).
+  const defaultUrls = [
+    "https://cloudflare-eth.com",
+    "https://rpc.ankr.com/eth",
+    ...(ALCHEMY_ETH_KEY ? [`https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_ETH_KEY}`] : [])
+  ];
 
-  const providers = urls.map(u => new ethers.JsonRpcProvider(u));
-  // If only one is provided, just use it.
+  const urls = urlsFromEnv.length ? urlsFromEnv : defaultUrls;
+
+  // Pin chainId=1 to avoid noisy network detection retries.
+  const providers = urls.map(u => new ethers.JsonRpcProvider(u, 1));
+
   if (providers.length === 1) return providers[0];
-  return new ethers.FallbackProvider(providers);
+
+  // quorum=1: any one healthy provider response is enough.
+  return new ethers.FallbackProvider(providers, 1);
 }
+
+// Create singleton ETH provider
+const ETH_PROVIDER = getEthProvider();
 
 // ===== REGISTER /verify SLASH COMMAND =====
 (async () => {
@@ -773,7 +779,7 @@ app.post("/api/start-verification", async (req, res) => {
   if (!wallet) return res.status(400).json({ success: false, error: "Missing wallet" });
 
   try {
-    // Clear any existing in-flight session so reconnect/change-wallet can proceed.
+    // Preserve any existing channelId (if started via /verify) and clear any in-flight session.
     challenges.delete(userId);
 
     // Eligibility gate (same as /verify flow)
@@ -792,7 +798,6 @@ app.post("/api/start-verification", async (req, res) => {
     }
 
     const challenge = `Verify ownership for ${wallet} at ${Date.now()}`;
-    const prev = challenges.get(userId);
     challenges.set(userId, { challenge, wallet, channelId: prev?.channelId || null });
 
     return res.json({
