@@ -132,7 +132,16 @@ function getVerifiedWallet(userId) {
 const scoreCache = new Map();
 const nftCache = new Map();
 // Match typical refresh cadence to reduce provider/API calls.
-const CACHE_TTL = 60 * 60 * 1000; // 1 hour
+const CACHE_TTL = 60 * 60 * 1000; 
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+function rateLimitMeta(message) {
+  return {
+    message: message || "Temporarily unavailable.",
+    retryAfterSeconds: 86400,
+    retryAfterAt: Date.now() + ONE_DAY_MS
+  };
+}
+// 1 hour
 
 function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
 
@@ -446,7 +455,7 @@ async function applyRolesForMember(guild, member, wallet) {
     roleReport.notAssigned[ROLE_NAMES.covenantVerified] = "You are not verified as a signatory (not found in the manifest whitelist).";
   } else {
     desired[ROLE_NAMES.covenantVerified] = null;
-    roleReport.notAssigned[ROLE_NAMES.covenantVerified] = "Temporarily unable to verify manifest status; your existing role will not be removed.";
+    roleReport.notAssigned[ROLE_NAMES.covenantVerified] = rateLimitMeta("Temporarily unable to verify manifest status (provider rate-limited).");
   }
 
   // Covenant Signatory O.G.: holds OG NFTs (Base and/or ETH)
@@ -456,7 +465,7 @@ async function applyRolesForMember(guild, member, wallet) {
     roleReport.notAssigned[ROLE_NAMES.covenantOg] = "You do not own the limited edition Human Tech Covenant Signatory.";
   } else {
     desired[ROLE_NAMES.covenantOg] = null;
-    roleReport.notAssigned[ROLE_NAMES.covenantOg] = "Temporarily unable to verify NFT ownership (provider rate-limited); your existing role will not be removed.";
+    roleReport.notAssigned[ROLE_NAMES.covenantOg] = rateLimitMeta("Temporarily unable to verify NFT ownership (provider rate-limited).");
   }
 
   // Covenant Contributor: holds Contributor NFT (ETH)
@@ -466,7 +475,7 @@ async function applyRolesForMember(guild, member, wallet) {
     roleReport.notAssigned[ROLE_NAMES.covenantContributor] = "You do not own the Human Tech Covenant Contributor NFT.";
   } else {
     desired[ROLE_NAMES.covenantContributor] = null;
-    roleReport.notAssigned[ROLE_NAMES.covenantContributor] = "Temporarily unable to verify Contributor NFT (provider rate-limited); your existing role will not be removed.";
+    roleReport.notAssigned[ROLE_NAMES.covenantContributor] = rateLimitMeta("Temporarily unable to verify Contributor NFT (provider rate-limited).");
   }
 
   // Chosen One: Passport >= 70
@@ -478,7 +487,7 @@ async function applyRolesForMember(guild, member, wallet) {
     }
   } else {
     desired[ROLE_NAMES.chosen] = null;
-    roleReport.notAssigned[ROLE_NAMES.chosen] = "Temporarily unable to fetch Passport score; your existing role will not be removed.";
+    roleReport.notAssigned[ROLE_NAMES.chosen] = rateLimitMeta("Temporarily unable to fetch Passport score (provider rate-limited).");
   }
 
   // O.G. HUMN: Passport >= 20
@@ -490,7 +499,7 @@ async function applyRolesForMember(guild, member, wallet) {
     }
   } else {
     desired[ROLE_NAMES.ogHumn] = null;
-    roleReport.notAssigned[ROLE_NAMES.ogHumn] = "Temporarily unable to fetch Passport score; your existing role will not be removed.";
+    roleReport.notAssigned[ROLE_NAMES.ogHumn] = rateLimitMeta("Temporarily unable to fetch Passport score (provider rate-limited).");
   }
 
   // qualifiedRoles = those explicitly true
@@ -744,8 +753,8 @@ app.post("/api/signature", async (req, res) => {
 
     return res.json({
       success: true,
-      score: Number(roleReport?.inputs?.passportScore ?? 0),
-      nft: Boolean(roleReport?.inputs?.nftHolder),
+      score: (typeof roleReport?.inputs?.passportScore === "number") ? roleReport.inputs.passportScore : null,
+      nft: (roleReport?.inputs?.nftHolder === true) ? true : (roleReport?.inputs?.nftHolder === false ? false : null),
       roles: roleReport.assignedRoles,
       assignedRoles: roleReport.assignedRoles,
       qualifiedRoles: roleReport.qualifiedRoles,
