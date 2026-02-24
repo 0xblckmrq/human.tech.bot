@@ -15,6 +15,13 @@ const {
 const fetch = (...args) => import("node-fetch").then(({ default: fetch }) => fetch(...args));
 const { ethers } = require("ethers");
 
+process.on("unhandledRejection", err => {
+  console.error("UnhandledRejection:", err);
+});
+process.on("uncaughtException", err => {
+  console.error("UncaughtException:", err);
+});
+
 // ===== CONFIG =====
 const TOKEN = process.env.BOT_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
@@ -218,7 +225,21 @@ async function checkBaseNFTOwnershipAlchemy(wallet) {
     // Note: Alchemy expects contractAddresses[] repeated query param.
     const url = `https://base-mainnet.g.alchemy.com/nft/v3/${ALCHEMY_BASE_KEY}/getNFTsForOwner?owner=${wallet}&contractAddresses[]=${BASE_NFT_CONTRACT}`;
     const res = await fetch(url);
-    const data = await res.json();
+
+    const text = await res.text();
+
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (_) {
+      console.error("[DEBUG] Alchemy Base returned non-JSON:", text.slice(0, 200));
+      return false;
+    }
+
+    if (!res.ok) {
+      console.error("[DEBUG] Alchemy Base error:", data);
+      return false;
+    }
 
     const owned = Array.isArray(data?.ownedNfts) ? data.ownedNfts : [];
     const hasNFT = owned.length > 0; // contractAddresses filter means any result implies ownership
@@ -427,7 +448,7 @@ async function applyRolesForMember(guild, member, wallet) {
 }
 
 // ===== DISCORD EVENTS =====
-client.once("ready", async () => {
+client.once("clientReady", async () => {
   console.log(`Logged in as ${client.user.tag}`);
 
   // ===== AUTO ROLE REFRESH (polling) =====
@@ -471,7 +492,15 @@ client.on("interactionCreate", async interaction => {
     const wallet = interaction.options.getString("wallet").toLowerCase();
     const userId = interaction.user.id.toString();
 
-    await interaction.deferReply({ ephemeral: true });
+try {
+  if (!interaction.deferred && !interaction.replied) {
+    await interaction.deferReply({ flags: 64 });
+  }
+} catch (err) {
+  if (err?.code === 10062) return;
+  console.error("deferReply failed:", err);
+  return;
+}
 
     const now = Date.now();
     const last = cooldowns.get(userId) || 0;
