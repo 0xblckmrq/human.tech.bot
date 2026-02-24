@@ -32,8 +32,8 @@ const PASSPORT_API_KEY = process.env.PASSPORT_API_KEY;
 const ALCHEMY_BASE_KEY = process.env.ALCHEMY_BASE_KEY; // Alchemy Base (NFT API)
 const ALCHEMY_ETH_KEY = process.env.ALCHEMY_ETH_KEY;
 const ALCHEMY_WEBHOOK_SIGNING_KEY = process.env.ALCHEMY_WEBHOOK_SIGNING_KEY; // Optional: verify Alchemy webhook signatures
-// Default polling to weekly when webhooks are configured; override with ROLE_REFRESH_MINUTES.
-const ROLE_REFRESH_MINUTES = Number(process.env.ROLE_REFRESH_MINUTES || 10080); // default: weekly (7 days)
+// Default polling to 12h when webhooks are configured; override with ROLE_REFRESH_MINUTES.
+const ROLE_REFRESH_MINUTES = Number(process.env.ROLE_REFRESH_MINUTES || 720);
  // Optional: Alchemy Ethereum RPC key to avoid throttled default providers
 
 if (!TOKEN || !CLIENT_ID || !GUILD_ID || !API_KEY || !EXTERNAL_URL || !PASSPORT_API_KEY || !ALCHEMY_BASE_KEY) {
@@ -130,7 +130,6 @@ function getVerifiedWallet(userId) {
 // ===== CACHES =====
 const scoreCache = new Map();
 const nftCache = new Map();
-const contributorCache = new Map();
 // Match typical refresh cadence to reduce provider/API calls.
 const CACHE_TTL = 60 * 60 * 1000; // 1 hour
 
@@ -156,67 +155,28 @@ async function retry(fn, retries = 3, delay = 1000) {
   throw lastError;
 }
 
-// ===== RPC PROVIDERS (FALLBACK + PINNED NETWORK) =====
-// Env overrides:
-// - ETH_RPC_URLS="url1,url2"
-// - BASE_RPC_URLS="url1,url2"
-const ETH_CHAIN_ID = 1;
-const BASE_CHAIN_ID = 8453;
-
-// Keep Alchemy as LAST fallback by default.
-function buildFallbackProvider(urls, chainId) {
-  const providers = urls.map(u => new ethers.JsonRpcProvider(u, chainId));
-  if (providers.length === 1) return providers[0];
-  return new ethers.FallbackProvider(providers);
-}
-
+// ===== ETH RPC PROVIDER (FALLBACK) =====
+// Supports env override via ETH_RPC_URLS="url1,url2" (optional).
 function getEthProvider() {
   const urlsFromEnv = String(process.env.ETH_RPC_URLS || "")
     .split(",")
     .map(s => s.trim())
     .filter(Boolean);
 
-  const alchemyUrl = ALCHEMY_ETH_KEY ? `https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_ETH_KEY}` : null;
-
   const urls = urlsFromEnv.length
-    ? [...urlsFromEnv]
+    ? urlsFromEnv
     : [
-        // Public-first (free)
+        ...(ALCHEMY_ETH_KEY ? [`https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_ETH_KEY}`] : []),
+        // Public fallbacks
         "https://cloudflare-eth.com",
         "https://rpc.ankr.com/eth"
       ];
 
-  // Always keep Alchemy as LAST fallback (if configured), even when custom ETH_RPC_URLS is set.
-  if (alchemyUrl && !urls.includes(alchemyUrl)) urls.push(alchemyUrl);
-
-  return buildFallbackProvider(urls, ETH_CHAIN_ID);
+  const providers = urls.map(u => new ethers.JsonRpcProvider(u));
+  // If only one is provided, just use it.
+  if (providers.length === 1) return providers[0];
+  return new ethers.FallbackProvider(providers);
 }
-
-function getBaseProvider() {
-  const urlsFromEnv = String(process.env.BASE_RPC_URLS || "")
-    .split(",")
-    .map(s => s.trim())
-    .filter(Boolean);
-
-  const alchemyUrl = ALCHEMY_BASE_KEY ? `https://base-mainnet.g.alchemy.com/v2/${ALCHEMY_BASE_KEY}` : null;
-
-  const urls = urlsFromEnv.length
-    ? [...urlsFromEnv]
-    : [
-        // Public-first (free)
-        "https://mainnet.base.org",
-        "https://base.publicnode.com"
-      ];
-
-  // Always keep Alchemy as LAST fallback (if configured), even when custom BASE_RPC_URLS is set.
-  if (alchemyUrl && !urls.includes(alchemyUrl)) urls.push(alchemyUrl);
-
-  return buildFallbackProvider(urls, BASE_CHAIN_ID);
-}
-
-// Singletons to avoid repeated network detection/log spam
-const ETH_PROVIDER = getEthProvider();
-const BASE_PROVIDER = getBaseProvider();
 
 // ===== REGISTER /verify SLASH COMMAND =====
 (async () => {
@@ -262,68 +222,16 @@ async function fetchPassportScore(wallet) {
 // ERC721 ABI
 const ERC721_ABI = ["function balanceOf(address owner) view returns (uint256)"];
 
-// Multicall3 (batch eth_call) is deployed at the same address on many chains.
-// Verified on Ethereum mainnet and Base mainnet.
-const MULTICALL3_ADDRESS = "0xcA11bde05977b3631167028862bE2a173976CA11";
-const MULTICALL3_ABI = [
-  "function aggregate3(tuple(address target,bool allowFailure,bytes callData)[] calls) view returns (tuple(bool success,bytes returnData)[] returnData)"
-];
-
-async function batchBalanceOf(provider, contractAddress, wallets, chunkSize = 200) {
-  const iface = new ethers.Interface(ERC721_ABI);
-  const multicall = new ethers.Contract(MULTICALL3_ADDRESS, MULTICALL3_ABI, provider);
-  const out = new Map();
-
-  for (let i = 0; i < wallets.length; i += chunkSize) {
-    const chunk = wallets.slice(i, i + chunkSize);
-    const calls = chunk.map(w => ({
-      target: contractAddress,
-      allowFailure: true,
-      callData: iface.encodeFunctionData("balanceOf", [w])
-    }));
-
-    let res;
-    try {
-      res = await multicall.aggregate3(calls);
-    } catch (e) {
-      console.error("[DEBUG] Multicall aggregate3 failed:", e.message);
-      chunk.forEach(w => out.set(w, null));
-      continue;
-    }
-
-    for (let j = 0; j < chunk.length; j++) {
-      const w = chunk[j];
-      const item = res[j];
-      if (!item || item.success === false) {
-        out.set(w, null);
-        continue;
-      }
-      try {
-        const [bal] = iface.decodeFunctionResult("balanceOf", item.returnData);
-        const has = (typeof bal === "bigint") ? bal > 0n : (bal?.gt?.(0) ?? Number(bal) > 0);
-        out.set(w, has);
-      } catch (_) {
-        out.set(w, null);
-      }
-    }
-  }
-
-  return out;
-}
-
 // ===== CONTRIBUTOR NFT CHECK (ETH MAINNET) =====
 const CONTRIBUTOR_NFT_CONTRACT = "0x25e580d1113d040af6bc2edd626cf50348973c70".toLowerCase();
 
 async function checkContributorNFTOwnershipEth(wallet) {
-  const cached = contributorCache.get(wallet);
-  if (cached && Date.now() - cached.timestamp < CACHE_TTL) return cached.isHolder;
-
-  let result = null;
   try {
+    const ethProvider = ETH_PROVIDER;
     const contributorContract = new ethers.Contract(
       CONTRIBUTOR_NFT_CONTRACT,
       ERC721_ABI,
-      ETH_PROVIDER
+      ethProvider
     );
     const balance = await contributorContract.balanceOf(wallet);
     console.log(`[DEBUG] Contributor NFT balance for ${wallet}:`, balance.toString());
@@ -331,33 +239,11 @@ async function checkContributorNFTOwnershipEth(wallet) {
       typeof balance === "bigint"
         ? balance > 0n
         : (balance?.gt?.(0) ?? Number(balance) > 0);
-    result = hasContributorNft;
+    return hasContributorNft;
   } catch (e) {
     console.error("[DEBUG] Contributor NFT check failed:", e.message);
-    result = null; // unknown (do not revoke on provider failure)
-  }
-
-  contributorCache.set(wallet, { isHolder: result, timestamp: Date.now() });
-  return result;
-}
-
-async function checkBaseNFTOwnershipRpc(wallet) {
-  try {
-    const baseContract = new ethers.Contract(
-      BASE_NFT_CONTRACT,
-      ERC721_ABI,
-      BASE_PROVIDER
-    );
-    const balance = await baseContract.balanceOf(wallet);
-    console.log(`[DEBUG] Base NFT balance for ${wallet}:`, balance.toString());
-    const hasBaseNft =
-      typeof balance === "bigint"
-        ? balance > 0n
-        : (balance?.gt?.(0) ?? Number(balance) > 0);
-    return hasBaseNft;
-  } catch (e) {
-    console.error("[DEBUG] Base RPC NFT check failed:", e.message);
-    return null; // unknown
+    // Unknown (do not revoke on provider failure)
+    return null;
   }
 }
 
@@ -367,7 +253,6 @@ async function checkBaseNFTOwnershipRpc(wallet) {
 // Docs: getNFTsForOwner (v3) supports Base and contractAddresses filtering.
 // https://www.alchemy.com/docs/reference/nft-api-endpoints/nft-api-endpoints/nft-ownership-endpoints/get-nf-ts-for-owner-v-3
 const BASE_NFT_CONTRACT = "0x89BC14a2fe52Ad7716F7a4a2b54426241CaB71BC".toLowerCase();
-const ETH_NFT_CONTRACT = "0xa3c5BB6A34d758FC5D5c656b06B51B4078Ba68a8".toLowerCase();
 
 async function checkBaseNFTOwnershipAlchemy(wallet) {
   try {
@@ -412,63 +297,51 @@ async function checkNFTOwnershipMulti(wallet) {
   if (nftInflight.has(wallet)) return nftInflight.get(wallet);
 
   const task = (async () => {
-    const cached = nftCache.get(wallet);
-    if (cached && Date.now() - cached.timestamp < CACHE_TTL) return cached.isHolder;
+  const cached = nftCache.get(wallet);
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL) return cached.isHolder;
 
-    let anyUnknown = false;
+  let anyUnknown = false;
 
-    // 1) Base RPC (free-first, Alchemy RPC last)
-    let baseHasNFT = await checkBaseNFTOwnershipRpc(wallet);
-    if (baseHasNFT === true) {
-      nftCache.set(wallet, { isHolder: true, timestamp: Date.now() });
-      return true;
-    }
-    if (baseHasNFT === null) anyUnknown = true;
+  // Base network using Alchemy API
+  let baseHasNFT = null;
+  try { baseHasNFT = await checkBaseNFTOwnershipAlchemy(wallet); }
+  catch (e) { console.error("Base NFT check failed:", e.message); baseHasNFT = null; }
+  if (baseHasNFT === true) {
+    nftCache.set(wallet, { isHolder: true, timestamp: Date.now() });
+    return true;
+  }
+  if (baseHasNFT === null) anyUnknown = true;
 
-    // 2) Ethereum mainnet (ERC721) with fallback provider (free-first, Alchemy last)
-    let ethHasNFT = null;
-    try {
-      const ethContract = new ethers.Contract(
-        ETH_NFT_CONTRACT,
-        ERC721_ABI,
-        ETH_PROVIDER
-      );
-      const balance = await ethContract.balanceOf(wallet);
-      console.log(`[DEBUG] Ethereum NFT balance for ${wallet}:`, balance.toString());
-      const hasEthNft =
-        typeof balance === "bigint"
-          ? balance > 0n
-          : (balance?.gt?.(0) ?? Number(balance) > 0);
-      ethHasNFT = hasEthNft;
-    } catch (e) {
-      console.error("[DEBUG] Ethereum NFT check failed:", e.message);
-      ethHasNFT = null;
-    }
+  // Ethereum mainnet (ERC721) with fallback provider
+  let ethHasNFT = null;
+  try {
+    const ethProvider = ETH_PROVIDER;
+    const ethContract = new ethers.Contract(
+      "0xa3c5bb6a34d758fc5d5c656b06b51b4078ba68a8",
+      ERC721_ABI,
+      ethProvider
+    );
+    const balance = await ethContract.balanceOf(wallet);
+    console.log(`[DEBUG] Ethereum NFT balance for ${wallet}:`, balance.toString());
+    // ethers v5 returns BigNumber (has .gt). ethers v6 returns bigint.
+    const hasEthNft =
+      typeof balance === "bigint"
+        ? balance > 0n
+        : (balance?.gt?.(0) ?? Number(balance) > 0);
+    ethHasNFT = hasEthNft;
+  } catch (e) {
+    console.error("[DEBUG] Ethereum NFT check failed:", e.message);
+    ethHasNFT = null;
+  }
+  if (ethHasNFT === true) {
+    nftCache.set(wallet, { isHolder: true, timestamp: Date.now() });
+    return true;
+  }
+  if (ethHasNFT === null) anyUnknown = true;
 
-    if (ethHasNFT === true) {
-      nftCache.set(wallet, { isHolder: true, timestamp: Date.now() });
-      return true;
-    }
-    if (ethHasNFT === null) anyUnknown = true;
-
-    // 3) Alchemy Base NFT API (LAST fallback; avoid unless needed)
-    // Only try if RPC checks were unknown (provider outage / rate limit).
-    if (anyUnknown) {
-      try {
-        const alchemyHas = await checkBaseNFTOwnershipAlchemy(wallet);
-        if (alchemyHas === true) {
-          nftCache.set(wallet, { isHolder: true, timestamp: Date.now() });
-          return true;
-        }
-        if (alchemyHas === null) anyUnknown = true;
-      } catch (e) {
-        console.error("[DEBUG] Alchemy Base NFT check failed:", e.message);
-      }
-    }
-
-    const final = anyUnknown ? null : false;
-    nftCache.set(wallet, { isHolder: final, timestamp: Date.now() });
-    return final;
+  const final = anyUnknown ? null : false;
+  nftCache.set(wallet, { isHolder: final, timestamp: Date.now() });
+  return final;
   })();
 
   nftInflight.set(wallet, task);
@@ -677,49 +550,15 @@ client.once("clientReady", async () => {
       const store = readVerifiedStore();
       const guild = client.guilds.cache.get(GUILD_ID);
       const entries = Object.entries(store);
-
-      // Batch on-chain checks (multicall) to minimize RPC load.
-      const wallets = entries
-        .map(([, info]) => (info?.wallet ? String(info.wallet).toLowerCase() : null))
-        .filter(Boolean);
-
-      const nowTs = Date.now();
-
-      // Prime caches for NFT holder + contributor holder using multicall
-      // (applyRolesForMember/computeEligibility will hit cache and avoid per-user RPC calls).
-      if (wallets.length) {
-        const [baseMap, ethMap, contribMap] = await Promise.all([
-          batchBalanceOf(BASE_PROVIDER, BASE_NFT_CONTRACT, wallets, 200),
-          batchBalanceOf(ETH_PROVIDER, ETH_NFT_CONTRACT, wallets, 200),
-          batchBalanceOf(ETH_PROVIDER, CONTRIBUTOR_NFT_CONTRACT, wallets, 200)
-        ]);
-
-        for (const w of wallets) {
-          const baseHas = baseMap.get(w);
-          const ethHas = ethMap.get(w);
-
-          let anyUnknown = false;
-          if (baseHas === true || ethHas === true) {
-            nftCache.set(w, { isHolder: true, timestamp: nowTs });
-          } else {
-            if (baseHas === null || ethHas === null) anyUnknown = true;
-            const final = anyUnknown ? null : false;
-            nftCache.set(w, { isHolder: final, timestamp: nowTs });
-          }
-
-          const cHas = contribMap.get(w);
-          contributorCache.set(w, { isHolder: (cHas === undefined ? null : cHas), timestamp: nowTs });
-        }
-      }
-
       for (const [uid, info] of entries) {
         const wallet = info?.wallet;
         if (!wallet) continue;
         try {
           const member = await guild.members.fetch(uid);
-          await applyRolesForMember(guild, member, wallet.toLowerCase());
+          await applyRolesForMember(guild, member, wallet);
           await sleep(800);
         } catch (e) {
+          // member may have left server
           if (String(e.message || "").includes("Unknown Member")) continue;
           console.error("Auto refresh failed for", uid, e.message);
         }
@@ -911,6 +750,73 @@ app.post("/api/signature", async (req, res) => {
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: "Verification failed" });
+  }
+});
+
+
+// ===== VERIFICATION SESSION MANAGEMENT (for signer UI) =====
+// Allows users to restart verification from the signer page without the bot getting "stuck".
+//
+// - /api/start-verification: (re)starts a verification session for a wallet
+//   * clears any existing pending session for the user
+//   * validates eligibility (SIGNED + VERIFIED)
+//   * returns a fresh challenge to sign
+//
+// - /api/cancel-verification: cancels an active verification session for the user
+//   * does NOT delete their stored verified wallet; it only clears the in-flight challenge
+
+app.post("/api/start-verification", async (req, res) => {
+  const userId = (req.body?.userId || "").toString();
+  const wallet = (req.body?.wallet || "").toString().toLowerCase();
+
+  if (!userId) return res.status(400).json({ success: false, error: "Missing userId" });
+  if (!wallet) return res.status(400).json({ success: false, error: "Missing wallet" });
+
+  try {
+    // Clear any existing in-flight session so reconnect/change-wallet can proceed.
+    challenges.delete(userId);
+
+    // Eligibility gate (same as /verify flow)
+    const list = await fetchWhitelist();
+    const entry = list.find(w =>
+      w.walletAddress?.toLowerCase() === wallet &&
+      w.covenantStatus?.toUpperCase() === "SIGNED" &&
+      w.humanityStatus?.toUpperCase() === "VERIFIED"
+    );
+
+    if (!entry) {
+      return res.status(400).json({
+        success: false,
+        error: "Wallet not eligible: must be SIGNED + VERIFIED."
+      });
+    }
+
+    const challenge = `Verify ownership for ${wallet} at ${Date.now()}`;
+    const prev = challenges.get(userId);
+    challenges.set(userId, { challenge, wallet, channelId: prev?.channelId || null });
+
+    return res.json({
+      success: true,
+      userId,
+      wallet,
+      challenge
+    });
+  } catch (e) {
+    console.error("start-verification failed:", e.message);
+    return res.status(500).json({ success: false, error: "Failed to start verification" });
+  }
+});
+
+app.post("/api/cancel-verification", async (req, res) => {
+  const userId = (req.body?.userId || "").toString();
+  if (!userId) return res.status(400).json({ success: false, error: "Missing userId" });
+
+  try {
+    challenges.delete(userId);
+    return res.json({ success: true });
+  } catch (e) {
+    console.error("cancel-verification failed:", e.message);
+    return res.status(500).json({ success: false, error: "Failed to cancel verification" });
   }
 });
 
